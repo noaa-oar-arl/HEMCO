@@ -33,7 +33,7 @@ MODULE HCO_inquireMod
 !
   PUBLIC  :: findFreeLUN
 !
-! !REVI<SION HISTORY:
+! !REVISION HISTORY:
 !  14 Jun 2012 - E. Nielsen  - Initial version
 !  See https://github.com/geoschem/hemco for complete history
 !EOP

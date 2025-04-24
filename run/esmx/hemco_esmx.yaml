@@ -1,0 +1,83 @@
+# HEMCO Earth System Modeling Extension (ESMX) Configuration
+# Created: April 23, 2025
+
+esmx_version: 1.0
+
+# Application configuration
+application:
+  name: HEMCO_ESMX_App
+  version: 1.0.0
+  description: HEMCO standalone application using ESMX framework
+
+# Time configuration
+time:
+  start_time: 2019-01-01T00:00:00Z
+  stop_time: 2019-01-02T00:00:00Z
+  time_step: PT1H  # 1-hour timestep in ISO 8601 duration format
+  calendar: gregorian
+
+# Components configuration
+components:
+  - name: HEMCO
+    model: HEMCO
+    version: 3.10.1
+    type: emissions
+    petlist_bounds: [0, 0]  # Use a single process
+    attributes:
+      standalone_mode: true
+      config_file: HEMCO_Config.rc
+      diagn_file: HEMCO_Diagn.rc
+      grid_file: HEMCO_sa_Grid.4x5.rc  # Use 4x5 degree grid
+      species_file: HEMCO_sa_Spec.rc
+      time_file: HEMCO_sa_Time.rc
+      debug_level: 0
+
+    # Import fields that HEMCO can receive from other components
+    # These are not used in standalone mode
+    import_fields:
+      - standard_name: air_temperature
+        canonical_units: K
+        ops: mean
+        default_value: 273.15
+      - standard_name: surface_pressure
+        canonical_units: Pa
+        ops: mean
+        default_value: 101325.0
+
+    # Export fields that HEMCO can provide to other components
+    export_fields:
+      - standard_name: nox_emissions_flux
+        canonical_units: kg m-2 s-1
+        ops: mean
+      - standard_name: co_emissions_flux
+        canonical_units: kg m-2 s-1
+        ops: mean
+      - standard_name: voc_emissions_flux
+        canonical_units: kg m-2 s-1
+        ops: mean
+
+# Connections between components (if multiple components)
+# Not needed for standalone mode but included as example
+connections:
+  - source:
+      component: HEMCO
+      field: nox_emissions_flux
+    destination:
+      component: ATMOSPHERE  # Placeholder for atmospheric model component
+      field: nox_emissions_tendency
+    operation: direct
+
+  - source:
+      component: HEMCO
+      field: co_emissions_flux
+    destination:
+      component: ATMOSPHERE
+      field: co_emissions_tendency
+    operation: direct
+
+# Resource configuration
+resources:
+  # Simple resource specification
+  processes: 1
+  threads_per_process: 1
+  memory_per_process: 4GB

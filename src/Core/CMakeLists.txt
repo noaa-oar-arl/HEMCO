@@ -51,6 +51,8 @@ elseif(HEMCO_INTERFACE STREQUAL gcclassic)
 	list(APPEND src_HCOCore hcoio_read_std_mod.F90 hcoio_write_std_mod.F90)
 elseif(HEMCO_INTERFACE STREQUAL mapl)
 	list(APPEND src_HCOCore hcoio_read_mapl_mod.F90 hcoio_write_mapl_mod.F90)
+elseif(HEMCO_INTERFACE STREQUAL nuopc)
+	list(APPEND src_HCOCore hcoio_read_std_mod.F90 hcoio_write_std_mod.F90)
 endif()
 
 add_library(HCO STATIC EXCLUDE_FROM_ALL
