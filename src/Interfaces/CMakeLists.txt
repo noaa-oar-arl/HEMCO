@@ -22,8 +22,3 @@ endif()
 if (BUILD_NUOPC_INTERFACE)
     add_subdirectory(NUOPC)
 endif()
-
-# Add ESMx Interface
-if (BUILD_ESMX_INTERFACE)
-    add_subdirectory(ESMX)
-endif()

@@ -183,10 +183,12 @@ CONTAINS
 !
 ! !USES:
 !
-#if defined( ESMF_ )
+#if defined( MAPL_ESMF )
 #include "MAPL_Generic.h"
     USE ESMF
     USE MAPLBase_Mod
+#elif defined( ESMF_ )
+    USE ESMF
 #endif
 !
 ! !INPUT PARAMETERS:
@@ -207,7 +209,11 @@ CONTAINS
 !BOC
     INTEGER             :: I, J, hcoLogLUN
     CHARACTER(LEN=1023) :: MSG, MSG1, MSG2
-#if defined( ESMF_)
+#if defined( MAPL_ESMF )
+    INTEGER             :: localPET, STATUS
+    CHARACTER(4)        :: localPETchar
+    TYPE(ESMF_VM)       :: VM
+#elif defined( ESMF_ )
     INTEGER             :: localPET, STATUS
     CHARACTER(4)        :: localPETchar
     TYPE(ESMF_VM)       :: VM
@@ -225,10 +231,16 @@ CONTAINS
     ENDIF
 
     ! Construct error message
-#if defined( ESMF_ )
-    ! Get current thread number
+#if defined( MAPL_ESMF )
+    ! Get current thread number using MAPL
     CALL ESMF_VMGetCurrent(VM, RC=STATUS)
     CALL ESMF_VmGet( VM, localPET=localPET, __RC__ )
+    WRITE(localPETchar,'(I4.4)') localPET
+    MSG1 = 'HEMCO ERROR ['//TRIM(localPETchar)//']: '//TRIM(ErrMsg)
+#elif defined( ESMF_ )
+    ! Get current thread number using pure ESMF
+    CALL ESMF_VMGetCurrent(VM, rc=STATUS)
+    CALL ESMF_VmGet( VM, localPet=localPET, rc=STATUS )
     WRITE(localPETchar,'(I4.4)') localPET
     MSG1 = 'HEMCO ERROR ['//TRIM(localPETchar)//']: '//TRIM(ErrMsg)
 #else

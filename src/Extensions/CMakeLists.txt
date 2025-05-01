@@ -26,10 +26,28 @@ add_library(HCOX STATIC EXCLUDE_FROM_ALL
 	hcox_volcano_mod.F90
 	ocean_toolbox_mod.F90
 )
+
+# Link to HEMCO core
 target_link_libraries(HCOX
 	PUBLIC HCO
 )
+
+# Add include directories
 target_include_directories(HCOX
 	INTERFACE ${HEMCO_BINARY_DIR}/mod
+)
+
+# Add ESMF include directories when building with ESMF
+if(BUILD_NUOPC_INTERFACE AND ESMF_FOUND)
+    target_include_directories(HCOX
+        PUBLIC ${ESMF_INCLUDE_DIRS}
+    )
+endif()
+
+# Add compiler options
+target_compile_options(HCOX
+	PRIVATE
+		""
+		$<$<STREQUAL:"${CMAKE_Fortran_COMPILER_ID}","GNU">:-ffree-line-length-none>
 )
 

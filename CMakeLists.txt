@@ -35,12 +35,20 @@ endif()
 # Options to build the ESMF/NUOPC interfaces
 #-----------------------------------------------------------------------------
 option(BUILD_NUOPC_INTERFACE "Build the HEMCO NUOPC interface" OFF)
-option(BUILD_ESMX_INTERFACE "Build the HEMCO ESMX interface" OFF)
+option(BUILD_MAPL_ESMF "Build with MAPL_ESMF support (otherwise pure ESMF)" ON)
 
-# If ESMX is enabled, NUOPC must also be enabled since ESMX depends on NUOPC
-if(BUILD_ESMX_INTERFACE AND NOT BUILD_NUOPC_INTERFACE)
-  set(BUILD_NUOPC_INTERFACE ON)
-  message(STATUS "NUOPC interface automatically enabled because ESMX interface requires it")
+# If NUOPC is enabled, define the ESMF preprocessor flag
+if(BUILD_NUOPC_INTERFACE)
+  # Add ESMF flag for pure ESMF compilation
+  add_compile_definitions(ESMF_)
+
+  # Find ESMF package
+  find_package(ESMF REQUIRED)
+
+  # Add MAPL_ESMF flag only if needed
+  if(BUILD_MAPL_ESMF)
+    add_compile_definitions(MAPL_ESMF)
+  endif()
 endif()
 
 #-----------------------------------------------------------------------------
@@ -96,9 +104,9 @@ set(HEMCO_Fortran_FLAGS_DEBUG_GNU
    CACHE STRING "HEMCO compiler flags for build type debug with GNU compilers"
 )
 
-# Add memory model flag only for non-Apple ARM architectures
+# Add memory model flag only for GNU and only on non-Apple ARM architectures
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64"))
-    set(HEMCO_Fortran_FLAGS_Intel "${HEMCO_Fortran_FLAGS_Intel} -mcmodel=medium")
+    # Only add mcmodel=medium for GNU compilers
     set(HEMCO_Fortran_FLAGS_GNU "${HEMCO_Fortran_FLAGS_GNU} -mcmodel=medium")
 endif()
 
@@ -191,6 +199,9 @@ list(APPEND CMAKE_PREFIX_PATH
     $ENV{NetCDF_Fortran_ROOT}
     $ENV{NETCDF_FORTRAN_ROOT}
 
+    # ESMF related paths
+    $ENV{ESMF_ROOT}         $ENV{ESMF_DIR}
+
     # Possible HEMCO environmnet variables (still needed? -ewl)
     $ENV{GC_F_BIN} 	    $ENV{GC_BIN}
     $ENV{GC_F_INCLUDE} 	    $ENV{GC_INCLUDE}
@@ -207,6 +218,20 @@ target_include_directories(HEMCOBuildProperties
 target_link_libraries(HEMCOBuildProperties
     INTERFACE ${NETCDF_LIBRARIES}
 )
+
+#-----------------------------------------------------------------------------
+# Add ESMF to build properties if NUOPC interface is enabled
+#-----------------------------------------------------------------------------
+if(BUILD_NUOPC_INTERFACE)
+  if(ESMF_FOUND)
+    target_include_directories(HEMCOBuildProperties
+      INTERFACE ${ESMF_INCLUDE_DIRS}
+    )
+    target_link_libraries(HEMCOBuildProperties
+      INTERFACE ${ESMF_LIBRARIES}
+    )
+  endif()
+endif()
 
 #-----------------------------------------------------------------------------
 # Use the NC_HAS_COMPRESSION def if nf_def_var_deflate is in netcdf.inc
@@ -348,6 +373,37 @@ if(HEMCO_EXTERNAL_CONFIG AND MAPL_ESMF)
     # Specify the HEMCO interface being used
     set(HEMCO_INTERFACE
         mapl
+        CACHE STRING "HEMCO interface type (used to choose appropriate I/O option)"
+    )
+endif()
+
+#-----------------------------------------------------------------------------
+# For HEMCO as submodule in NUOPC ESMF superproject
+#-----------------------------------------------------------------------------
+if(HEMCO_EXTERNAL_CONFIG AND BUILD_NUOPC_INTERFACE)
+    if(TARGET ESMF)
+      target_link_libraries(HEMCOBuildProperties
+          INTERFACE $<LINK_ONLY:ESMF>
+      )
+      target_include_directories(HEMCOBuildProperties
+          INTERFACE $<TARGET_PROPERTY:ESMF,INTERFACE_INCLUDE_DIRECTORIES>
+      )
+    else()
+      message(STATUS "No ESMF target found, using direct include/link settings")
+      target_include_directories(HEMCOBuildProperties
+          INTERFACE ${ESMF_INCLUDE_DIRS}
+      )
+      target_link_libraries(HEMCOBuildProperties
+          INTERFACE ${ESMF_LIBRARIES}
+      )
+    endif()
+    target_compile_definitions(HEMCOBuildProperties
+        INTERFACE ESMF_ NUOPC
+    )
+
+    # Specify the HEMCO interface being used
+    set(HEMCO_INTERFACE
+        nuopc
         CACHE STRING "HEMCO interface type (used to choose appropriate I/O option)"
     )
 endif()

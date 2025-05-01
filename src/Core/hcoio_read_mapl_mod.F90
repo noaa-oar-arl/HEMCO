@@ -1,8 +1,6 @@
-!BOC
-#if defined ( ESMF_ )
-! The 'standard' HEMCO I/O module is used for:
-! - GEOS-Chem High Performance / GCHP and GEOS (ESMF_)
-!EOC
+#if defined ( ESMF_ ) && defined ( MAPL_ESMF )
+! The 'MAPL-based' HEMCO I/O module is used for:
+! - GEOS-Chem High Performance / GCHP and GEOS (ESMF_ with MAPL_ESMF)
 !------------------------------------------------------------------------------
 !                   Harmonized Emissions Component (HEMCO)                    !
 !------------------------------------------------------------------------------

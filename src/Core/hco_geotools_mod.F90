@@ -103,7 +103,7 @@ CONTAINS
 !BOC
 !
 ! !DEFINED PARAMETERS:
-!   
+!
     ! Threshold at which a grid-box is considered ice
     REAL(sp), PARAMETER :: frac_classify_land_ice_as_ice = 0.5_sp
 
@@ -539,7 +539,7 @@ CONTAINS
 
   END SUBROUTINE HCO_GetSUNCOS
 !EOC
-#if defined(ESMF_)
+#if defined(ESMF_) && defined(MAPL_ESMF)
 !------------------------------------------------------------------------------
 !                   Harmonized Emissions Component (HEMCO)                    !
 !------------------------------------------------------------------------------
@@ -615,6 +615,147 @@ CONTAINS
 
     ! Return w/ success
     RC =  HCO_SUCCESS
+
+  END SUBROUTINE HCO_GetHorzIJIndex
+!EOC
+#elif defined(ESMF_)
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: HCO_GetHorzIJIndex
+!
+! !DESCRIPTION: Function HCO\_GetHorzIJIndex returns the grid box index for
+!  the given longitude (deg E, -180...180), and latitude (deg N, -90...90).
+!  This is the pure ESMF implementation without MAPL.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE HCO_GetHorzIJIndex( HcoState, N, Lon, Lat, idx, jdx, RC )
+!
+! !USES:
+!
+    USE ESMF
+    USE HCO_STATE_MOD,   ONLY : HCO_STATE
+!
+! !INPUT PARAMETERS:
+!
+    TYPE(HCO_State), POINTER        :: HcoState       ! HEMCO state object
+    INTEGER,         INTENT(IN   )  :: N
+    REAL(hp),        INTENT(IN   )  :: Lon(N)
+    REAL(hp),        INTENT(IN   )  :: Lat(N)
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    INTEGER,         INTENT(INOUT)  :: RC
+!
+! !OUTPUT PARAMETERS:
+!
+    INTEGER,         INTENT(  OUT)  :: IDX(N), JDX(N)
+!
+! !REVISION HISTORY:
+!  29 Apr 2025 - Initial version for pure ESMF
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    INTEGER                    :: i, localrc
+    REAL, PARAMETER            :: radToDeg = 57.2957795
+    TYPE(ESMF_Grid)            :: grid
+    TYPE(ESMF_CoordSys_Flag)   :: coordSys
+    INTEGER                    :: coordDim
+    REAL(ESMF_KIND_R8), POINTER :: coordX(:,:), coordY(:,:)
+    INTEGER                    :: nLon, nLat
+    REAL(hp)                   :: lonMin, lonMax, latMin, latMax
+    REAL(hp)                   :: dLon, dLat
+    LOGICAL                    :: found
+    CHARACTER(LEN=255)         :: MSG
+    CHARACTER(LEN=255)         :: LOC = 'HCO_GetHorzIJIndex (hco_geotools_mod.F90)'
+
+    !-------------------------------
+    ! HCO_GetHorzIJIndex begins here
+    !-------------------------------
+
+    ! Initialize
+    RC = HCO_SUCCESS
+    IDX(:) = -1
+    JDX(:) = -1
+
+    ! Get grid
+    IF (ASSOCIATED(HcoState%GridComp)) THEN
+       CALL ESMF_GridCompGet(HcoState%GridComp, grid=grid, rc=localrc)
+       IF (localrc /= ESMF_SUCCESS) THEN
+          MSG = 'Error getting grid from GridComp'
+          CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+          RETURN
+       ENDIF
+    ELSE
+       MSG = 'GridComp not associated'
+       CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+       RETURN
+    ENDIF
+
+    ! Get coordinate information
+    CALL ESMF_GridGet(grid, coordSys=coordSys, dimCount=coordDim, rc=localrc)
+    IF (localrc /= ESMF_SUCCESS) THEN
+       MSG = 'Error getting grid coordinate system'
+       CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+       RETURN
+    ENDIF
+
+    ! Get coordinate arrays
+    CALL ESMF_GridGetCoord(grid, coordDim=1, localDE=0, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=coordX, rc=localrc)
+    IF (localrc /= ESMF_SUCCESS) THEN
+       MSG = 'Error getting X coordinates'
+       CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+       RETURN
+    ENDIF
+
+    CALL ESMF_GridGetCoord(grid, coordDim=2, localDE=0, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=coordY, rc=localrc)
+    IF (localrc /= ESMF_SUCCESS) THEN
+       MSG = 'Error getting Y coordinates'
+       CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+       RETURN
+    ENDIF
+
+    ! Get grid dimensions
+    nLon = SIZE(coordX, 1)
+    nLat = SIZE(coordY, 2)
+
+    ! Calculate min/max values and grid spacing
+    lonMin = MINVAL(coordX) * radToDeg
+    lonMax = MAXVAL(coordX) * radToDeg
+    latMin = MINVAL(coordY) * radToDeg
+    latMax = MAXVAL(coordY) * radToDeg
+
+    dLon = (lonMax - lonMin) / (nLon - 1)
+    dLat = (latMax - latMin) / (nLat - 1)
+
+    ! For each point, find the closest grid cell
+    DO i = 1, N
+       ! First check if point is within grid bounds
+       IF (Lon(i) < lonMin .OR. Lon(i) > lonMax .OR. &
+           Lat(i) < latMin .OR. Lat(i) > latMax) THEN
+          IDX(i) = -1
+          JDX(i) = -1
+          CYCLE
+       ENDIF
+
+       ! Calculate indices directly (fast approximation for regular grids)
+       IDX(i) = MIN(MAX(NINT((Lon(i) - lonMin) / dLon) + 1, 1), nLon)
+       JDX(i) = MIN(MAX(NINT((Lat(i) - latMin) / dLat) + 1, 1), nLat)
+    ENDDO
+
+    ! Return with success
+    RC = HCO_SUCCESS
 
   END SUBROUTINE HCO_GetHorzIJIndex
 !EOC
@@ -1125,7 +1266,7 @@ CONTAINS
     ENDIF
 
     ! If Box height isn't available, free its memory
-    ! NOTE: Using NULL instead of deallocate here causes a memory leak! 
+    ! NOTE: Using NULL instead of deallocate here causes a memory leak!
     IF ( .NOT. EVAL_BXHEIGHT .OR. .NOT. FoundBXHEIGHT ) THEN
        CALL HCO_ArrCleanup( HcoState%Grid%BXHEIGHT_M, DeepClean=.TRUE. )
     ENDIF

@@ -1,17 +1,15 @@
-!BOC
-#if defined ( ESMF_ )
-! The 'standard' HEMCO I/O module is used for:
-! - GEOS-Chem High Performance / GCHP and GEOS (ESMF_)
-!EOC
+#if defined ( ESMF_ ) && defined ( MAPL_ESMF )
+! The 'MAPL-based' HEMCO I/O module is used for:
+! - GEOS-Chem High Performance / GCHP and GEOS (ESMF_ with MAPL_ESMF)
 !------------------------------------------------------------------------------
 !                   Harmonized Emissions Component (HEMCO)                    !
 !------------------------------------------------------------------------------
 !BOP
 !
-! !MODULE: hcoio_write_esmf_mod.F90
+! !MODULE: hcoio_write_mapl_mod.F90
 !
 ! !DESCRIPTION: Module HCOIO\_Write\_Mod.F90 is the HEMCO output
-! interface for the ESMF environment.
+! interface for the ESMF/MAPL environment.
 ! In an ESMF/MAPL environment, the HEMCO diagnostics are not directly
 ! written to disk but passed to the gridded component export state, where
 ! they can be picked up by the MAPL HISTORY component.
@@ -117,10 +115,10 @@ CONTAINS
     REAL, POINTER             :: Ptr2D(:,:)
     REAL, POINTER             :: Ptr3D(:,:,:)
 
-    CHARACTER(LEN=255), PARAMETER :: LOC = 'HCOIO_WRITE_ESMF (hcoio_write_esmf_mod.F90)'
+    CHARACTER(LEN=255), PARAMETER :: LOC = 'HCOIO_WRITE_MAPL (hcoio_write_mapl_mod.F90)'
 
     !=================================================================
-    ! HCOIO_WRITE_ESMF begins here!
+    ! HCOIO_WRITE_MAPL begins here!
     !=================================================================
 
     ! Assume success until otherwise

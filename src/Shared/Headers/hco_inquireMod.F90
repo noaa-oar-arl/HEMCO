@@ -1,8 +1,3 @@
-#ifdef ESMF_
-! We only need to refer to this include file if we are connecting
-! to the GEOS-5 GCM via the ESMF/MAPL framework (bmy, 8/3/12)
-#include "MAPL_Generic.h"
-#endif
 !------------------------------------------------------------------------
 !     NASA/GSFC, Global Modeling and Assimilation Office, Code 910.1    !
 !------------------------------------------------------------------------
@@ -20,10 +15,16 @@ MODULE HCO_inquireMod
 ! !USES:
 !
 #ifdef ESMF_
-  ! We only need to refer to these modules if we are connecting
-  ! to the GEOS-5 GCM via the ESMF/MAPL framework (bmy, 8/3/12)
+  ! ESMF Framework
   USE ESMF
+
+#ifdef MAPL_ESMF
+  ! MAPL/ESMF Framework
   USE MAPLBase_Mod
+  ! We only need to refer to this include file if we are connecting
+  ! to the GEOS-5 GCM via the ESMF/MAPL framework (bmy, 8/3/12)
+#include "MAPL_Generic.h"
+#endif
 #endif
 
   IMPLICIT NONE
@@ -119,7 +120,14 @@ MODULE HCO_inquireMod
     ENDIF
 
 #ifdef ESMF_
+#ifdef MAPL_ESMF
     VERIFY_(status)
+#else
+    ! Handle pure ESMF case
+    IF (status /= 0) THEN
+      CALL ESMF_LogWrite("No available logical units", ESMF_LOGMSG_ERROR)
+    ENDIF
+#endif
 #endif
 
   END FUNCTION findFreeLUN

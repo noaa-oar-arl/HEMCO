@@ -70,3 +70,29 @@ target_compile_options(HCO
 target_include_directories(HCO
 	INTERFACE ${HEMCO_BINARY_DIR}/mod
 )
+
+# Add ESMF I/O code conditionally when using ESMF/NUOPC
+if(BUILD_NUOPC_INTERFACE)
+    target_sources(HCO PRIVATE
+        hcoio_read_esmf_mod.F90
+        hcoio_write_esmf_mod.F90
+    )
+endif()
+
+# Add MAPL I/O code conditionally when using MAPL_ESMF
+if(MAPL_ESMF)
+    target_sources(HCO PRIVATE
+        hcoio_read_mapl_mod.F90
+        hcoio_write_mapl_mod.F90
+    )
+endif()
+
+# Add ESMF include directories when building with ESMF
+if(BUILD_NUOPC_INTERFACE AND ESMF_FOUND)
+    target_include_directories(HCO
+        PUBLIC ${ESMF_INCLUDE_DIRS}
+    )
+    target_link_libraries(HCO
+        PUBLIC ${ESMF_LIBRARIES}
+    )
+endif()

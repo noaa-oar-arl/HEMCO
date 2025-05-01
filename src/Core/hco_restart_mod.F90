@@ -745,11 +745,15 @@ CONTAINS
 !
 ! !USES:
 !
+#if defined(MAPL_ESMF)
 #include "MAPL_Generic.h"
     USE ESMF
     USE ESMFL_MOD
     USE MAPL_GenericMod
     USE MAPL_ErrorHandlingMod
+#else
+    USE ESMF
+#endif
     USE HCO_STATE_MOD,   ONLY : Hco_State
 !
 ! !ARGUMENTS:
@@ -772,8 +776,13 @@ CONTAINS
 ! !LOCAL VARIABLES:
 !
     INTEGER                      :: STAT
+#if defined(MAPL_ESMF)
     TYPE(MAPL_MetaComp), POINTER :: STATE
     TYPE(ESMF_STATE)             :: INTERNAL
+#else
+    INTEGER                      :: STATE
+    INTEGER                      :: INTERNAL
+#endif
     REAL,                POINTER :: Ptr2D(:,:)
     REAL,                POINTER :: Ptr3D(:,:,:)
 
@@ -781,6 +790,7 @@ CONTAINS
     ! HCO_CopyFromIntnal_ESMF begins here
     ! ================================================================
 
+#if defined(MAPL_ESMF)
     ! For MAPL/ESMF error handling (defines Iam and STATUS)
     __Iam__('HCO_CopyFromIntnal_ESMF (hco_restart_mod.F90)')
 
@@ -852,6 +862,13 @@ CONTAINS
        ! Cleanup
        Ptr3D => NULL()
     ENDIF
+#else
+    ! For non-MAPL ESMF, we don't have access to the MAPL internal state
+    ! So we'll just say that we didn't find anything
+    Found = .FALSE.
+    Ptr2D => NULL()
+    Ptr3D => NULL()
+#endif
 
     ! Return success
     RC = HCO_SUCCESS
