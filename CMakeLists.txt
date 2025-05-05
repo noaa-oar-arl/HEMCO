@@ -41,6 +41,7 @@ option(BUILD_MAPL_ESMF "Build with MAPL_ESMF support (otherwise pure ESMF)" ON)
 if(BUILD_NUOPC_INTERFACE)
   # Add ESMF flag for pure ESMF compilation
   add_compile_definitions(ESMF_)
+  add_compile_definitions(NUOPC_ENABLED)
 
   # Find ESMF package
   find_package(ESMF REQUIRED)
@@ -48,6 +49,15 @@ if(BUILD_NUOPC_INTERFACE)
   # Add MAPL_ESMF flag only if needed
   if(BUILD_MAPL_ESMF)
     add_compile_definitions(MAPL_ESMF)
+  endif()
+
+  # Print ESMF configuration information
+  if(ESMF_FOUND)
+    message(STATUS "Found ESMF:")
+    message(STATUS "  ESMF_INCLUDE_DIRS: ${ESMF_INCLUDE_DIRS}")
+    message(STATUS "  ESMF_LIBRARIES: ${ESMF_LIBRARIES}")
+  else()
+    message(FATAL_ERROR "ESMF is required but was not found!")
   endif()
 endif()
 
@@ -398,7 +408,7 @@ if(HEMCO_EXTERNAL_CONFIG AND BUILD_NUOPC_INTERFACE)
       )
     endif()
     target_compile_definitions(HEMCOBuildProperties
-        INTERFACE ESMF_ NUOPC
+        INTERFACE ESMF_ NUOPC_ENABLED
     )
 
     # Specify the HEMCO interface being used

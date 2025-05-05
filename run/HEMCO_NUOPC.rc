@@ -1,0 +1,66 @@
+# HEMCO NUOPC Configuration File
+# Defines field specifications and general HEMCO configuration parameters for ESM coupling
+
+# Core HEMCO configuration parameters
+HEMCO_CORE::
+HEMCO_CONFIG      HEMCO_Config.rc.nuopc    # Main HEMCO configuration file
+HEMCO_DIAGN       HEMCO_Diagn.rc     # HEMCO diagnostics configuration file
+HEMCO_LOGFILE     HEMCO.log          # HEMCO log file name
+HEMCO_DATA_ROOT   ./                 # Root directory for HEMCO data
+HEMCO_SPECIES     HEMCO.species.rc   # HEMCO species definition file
+::
+
+HEMCO_IMPORTS::
+# Format: field_name long_name units dimension vertical_location
+# Surface and 2D fields
+AREA        "grid_cell_area"                    "m2"       2  NONE
+PS          "surface_pressure"                  "Pa"       2  NONE
+U10M        "10-meter_eastward_wind"            "m/s"      2  NONE
+V10M        "10-meter_northward_wind"           "m/s"      2  NONE
+T2M         "2-meter_air_temperature"           "K"        2  NONE
+TS          "surface_skin_temperature"          "K"        2  NONE
+FRLAND      "fraction_of_land"                  "1"        2  NONE
+FRLANDICE   "fraction_of_land_ice"              "1"        2  NONE
+FROCEAN     "fraction_of_ocean"                 "1"        2  NONE
+FRLAKE      "fraction_of_lake"                  "1"        2  NONE
+ALBVF       "surface_albedo_for_visible_diffuse" "1"       2  NONE
+TROPP       "tropopause_pressure"               "Pa"       2  NONE
+SNOMAS      "snow_mass"                         "kg/m2"    2  NONE
+LAI         "leaf_area_index"                   "1"        2  NONE
+USTAR       "surface_velocity_scale"            "m/s"      2  NONE
+Z0H         "surface_roughness"                 "m"        2  NONE
+WET1        "surface_soil_wetness"              "1"        2  NONE
+WET2        "root_soil_wetness"                 "1"        2  NONE
+DRPAR       "surface_downwelling_par_beam_flux"  "W/m2"    2  NONE
+DFPAR       "surface_downwelling_par_diffuse_flux" "W/m2"  2  NONE
+SWNDSRF     "surface_net_downward_shortwave_flux" "W/m2"   2  NONE
+CLDTT       "total_cloud_area_fraction"         "1"        2  NONE
+
+# 3D fields
+AIRDENS     "air_density"                       "kg/m3"    3  CENTER
+PLE         "air_pressure_layer_interfaces"     "Pa"       3  EDGE
+ZLE         "geopotential_height"               "m"        3  EDGE
+T           "air_temperature"                   "K"        3  CENTER
+Q           "specific_humidity"                 "kg/kg"    3  CENTER
+CNV_MFC     "cumulative_mass_flux"              "kg/m2/s"  3  EDGE
+
+# Emission fields that come from external components
+CO_EMISSIONS   "carbon_monoxide_emissions"      "kg/m2/s"  2  NONE
+NOX_EMISSIONS  "nitrogen_oxides_emissions"      "kg/m2/s"  2  NONE
+BC_EMISSIONS   "black_carbon_emissions"         "kg/m2/s"  2  NONE
+NH3_EMISSIONS  "ammonia_emissions"              "kg/m2/s"  2  NONE
+CH4_EMISSIONS  "methane_emissions"              "kg/m2/s"  2  NONE
+VOC_EMISSIONS  "volatile_organic_compound_emissions" "kg/m2/s" 2 NONE
+::
+
+HEMCO_EXPORTS::
+# Format: field_name long_name units dimension
+# These are defined by the HEMCO diagnostic configuration and can be customized here
+# for additional exports beyond what HEMCO automatically provides
+HEMCO_CO    "HEMCO_carbon_monoxide_emissions"      "kg/m2/s"  2
+HEMCO_NOx   "HEMCO_nitrogen_oxides_emissions"      "kg/m2/s"  2
+HEMCO_BC    "HEMCO_black_carbon_emissions"         "kg/m2/s"  2
+HEMCO_NH3   "HEMCO_ammonia_emissions"              "kg/m2/s"  2
+HEMCO_CH4   "HEMCO_methane_emissions"              "kg/m2/s"  2
+HEMCO_VOC   "HEMCO_volatile_organic_compound_emissions" "kg/m2/s"  2
+::

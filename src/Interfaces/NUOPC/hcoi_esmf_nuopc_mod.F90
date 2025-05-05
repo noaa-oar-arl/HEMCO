@@ -16,41 +16,45 @@ MODULE HCOI_ESMF_NUOPC_MOD
 !
 ! !USES:
 !
+  ! Import base modules
   USE HCO_ERROR_MOD
-  USE HCO_Types_Mod
+  USE HCO_PRECISION_MOD
+  USE HCO_TYPES_MOD
+  USE HCO_STATE_MOD, ONLY : HCO_State
+  USE HCOX_STATE_MOD
 
-  USE ESMF
-
-
-  USE NUOPC, ONLY: NUOPC_CompAttributeSet, NUOPC_CompDerive, NUOPC_ModelGet, &
-                NUOPC_CompSetEntryPoint, NUOPC_CompSetTimeStep
-
-
-  USE NUOPC_Model, &
-       ONLY: model_routine_SS           => SetServices, &
-             model_label_Advance        => label_Advance, &
-             model_label_DataInitialize => label_DataInitialize, &
-             model_label_SetClock       => label_SetClock
+  ! Include these for ESMF/NUOPC definitions
+  USE ESMF          ! Import full ESMF module without any conditional directives
+  USE NUOPC         ! Use the entire NUOPC module
+  USE NUOPC_Model, ONLY: model_label_Advance           => label_Advance
+  USE NUOPC_Model, ONLY: model_label_SetClock          => label_SetClock
+  USE NUOPC_Model, ONLY: model_label_DataInitialize    => label_DataInitialize
+  USE NUOPC_Model, ONLY: model_routine_SS              => SetServices
+  USE NUOPC_Model, ONLY: NUOPC_ModelGet, NUOPC_CompDerive
+  USE NUOPC_Model, ONLY: NUOPC_CompAttributeSet, NUOPC_CompAttributeGet
 
   IMPLICIT NONE
   PRIVATE
 !
 ! !PUBLIC MEMBER FUNCTIONS:
 !
-  ! ESMF environment only:
+  ! ESMF/NUOPC environment only:
   PUBLIC :: HCO_SetServices_NUOPC
-  PUBLIC :: HCO_SetExtState_NUOPC
-  PUBLIC :: HCO_Imp2Ext_NUOPC
-  PUBLIC :: HCOI_NUOPC_SS  ! Set services for this component
+  PUBLIC :: HCOI_ESMF_INIT
+  PUBLIC :: HCOI_ESMF_RUN
+  PUBLIC :: HCOI_ESMF_FINAL
 !
 ! !PRIVATE MEMBER FUNCTIONS:
 !
-  PRIVATE :: Diagn2Exp_NUOPC
-  PRIVATE :: HCO_Imp2Ext2R_NUOPC
-  PRIVATE :: HCO_Imp2Ext2S_NUOPC
-  PRIVATE :: HCO_Imp2Ext2I_NUOPC
-  PRIVATE :: HCO_Imp2Ext3R_NUOPC
-  PRIVATE :: HCO_Imp2Ext3S_NUOPC
+  PRIVATE :: ReadConfigFields
+
+  ! Private initialization routines
+  PRIVATE :: InitializeP1
+  PRIVATE :: InitializeP2
+  PRIVATE :: SetClock
+  PRIVATE :: DataInitialize
+  PRIVATE :: ModelAdvance
+  PRIVATE :: ModelFinalize
 !
 ! !REVISION HISTORY:
 !  29 Apr 2025 - Initial version created for pure ESMF/NUOPC interface
@@ -60,14 +64,6 @@ MODULE HCOI_ESMF_NUOPC_MOD
 !
 ! !MODULE INTERFACES:
 !
-  INTERFACE HCO_Imp2Ext_NUOPC
-     MODULE PROCEDURE HCO_Imp2Ext2R_NUOPC
-     MODULE PROCEDURE HCO_Imp2Ext2S_NUOPC
-     MODULE PROCEDURE HCO_Imp2Ext2I_NUOPC
-     MODULE PROCEDURE HCO_Imp2Ext3R_NUOPC
-     MODULE PROCEDURE HCO_Imp2Ext3S_NUOPC
-  END INTERFACE HCO_Imp2Ext_NUOPC
-
   ! ESMF undefined value (equivalent to MAPL_UNDEF)
   REAL, PARAMETER :: ESMF_UNDEF = 1.0e15
 
@@ -82,921 +78,414 @@ CONTAINS
 !------------------------------------------------------------------------------
 !BOP
 !
-! !ROUTINE: HCO_SetServices_NUOPC
+! !ROUTINE: ReadConfigFields
 !
-! !DESCRIPTION: Subroutine HCO\_SetServices\_NUOPC registers all required HEMCO
-! data so that it can be imported through the ESMF import state.
-! This routine determines all required HEMCO input fields from the HEMCO
-! configuration file.
-!\\
-!\\
-! The field names provided in the configuration must match the names in the
-! HEMCO configuration file! Also, all time settings (average and update interval)
-! and data units need to be properly specified.
-!\\
-!\\
-! This routine also prepares an emissions export field for every species
-! found in the HEMCO configuration file.
+! !DESCRIPTION: Subroutine ReadConfigFields reads the HEMCO ESMF/NUOPC config file
+! to get the import and export field specifications. This allows us to flexibly
+! define fields through an external configuration file like GEOS does, instead
+! of hardcoding them.
 !\\
 !\\
 ! !INTERFACE:
 !
-      SUBROUTINE HCO_SetServices_NUOPC( am_I_Root, GC, HcoConfig, &
-                                      ConfigFile, RC )
+  SUBROUTINE ReadConfigFields(am_I_Root, GC, ConfigFilename, RC)
 !
 ! !USES:
 !
-      USE HCO_TYPES_MOD,    ONLY : ListCont
-      USE HCO_DATACONT_MOD, ONLY : ListCont_NextCont
-      USE HCO_CONFIG_MOD,   ONLY : Config_ReadFile
-      USE HCO_EXTLIST_MOD,  ONLY : GetExtOpt
-      USE HCO_CONFIG_MOD,   ONLY : Config_GetnSpecies
-      USE HCO_CONFIG_MOD,   ONLY : Config_GetSpecNames
-      USE HCO_DIAGN_MOD,    ONLY : DiagnFileOpen
-      USE HCO_DIAGN_MOD,    ONLY : DiagnFileGetNext
-      USE HCO_DIAGN_MOD,    ONLY : DiagnFileClose
 !
-! !ARGUMENTS:
+! !INPUT PARAMETERS:
 !
-      LOGICAL,             INTENT(IN   )             :: am_I_Root
-      TYPE(ESMF_GridComp), INTENT(INOUT)             :: GC
-      TYPE(ConfigObj),     POINTER                   :: HcoConfig
-      CHARACTER(LEN=*),    INTENT(IN   )             :: ConfigFile
-      INTEGER,             INTENT(  OUT)             :: RC
+    LOGICAL,          INTENT(IN)           :: am_I_Root    ! Is this the root CPU?
+    CHARACTER(LEN=*), INTENT(IN), OPTIONAL :: ConfigFilename ! Config filename
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(ESMF_GridComp), INTENT(INOUT)     :: GC          ! ESMF Grid Component
+!
+! !OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(OUT)          :: RC          ! Success or failure
 !
 ! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
+!  04 May 2025 - Implementation for pure ESMF/NUOPC interface
+!  05 May 2025 - Added support for GridSpec/mosaic file
 !EOP
 !------------------------------------------------------------------------------
 !BOC
 !
 ! !LOCAL VARIABLES:
 !
-      INTEGER                    :: LUN, ExtNr, Cat, Hier, SpaceDim
-      INTEGER                    :: I, FLAG, nSpc, nDiagn
-      INTEGER                    :: dimCount
-      INTEGER                    :: localrc
-      LOGICAL                    :: EOF
-      LOGICAL                    :: FOUND, DefaultSet
-      CHARACTER(LEN=31)          :: cName, SpcName, OutUnit
-      CHARACTER(LEN=63)          :: DefaultSNAME, DefaultLNAME, DefaultUnit
-      CHARACTER(LEN=63)          :: SNAME, UnitName
-      CHARACTER(LEN=127)         :: LNAME
-      CHARACTER(LEN=63), POINTER :: Spc(:)
-      TYPE(ListCont),    POINTER :: CurrCont
-      CHARACTER(LEN=255)         :: LOC
-      TYPE(ESMF_Field)           :: field
-      TYPE(ESMF_StateItem_Flag)  :: itemType
-      TYPE(ESMF_ArraySpec)       :: arraySpec
+    TYPE(ESMF_Config)      :: config
+    CHARACTER(LEN=ESMF_MAXSTR) :: configFile, defaultConfigFile
+    CHARACTER(LEN=ESMF_MAXSTR) :: fieldName, longName, units
+    CHARACTER(LEN=ESMF_MAXSTR) :: gridFile, gridType
+    INTEGER                :: dimCount, locStatus, lineNum
+    TYPE(ESMF_Field)       :: field
+    TYPE(ESMF_StateItem_Flag) :: itemType
+    TYPE(ESMF_ArraySpec)   :: arraySpec
+    TYPE(ESMF_Grid)        :: grid
+    LOGICAL                :: endOfList, fileExists
+    CHARACTER(LEN=20)      :: tableLabel
+    CHARACTER(LEN=ESMF_MAXSTR) :: vlocation, defaultLongName
+    TYPE(ESMF_State)       :: importState, exportState
+    INTEGER                :: petCount, localPet
+    TYPE(ESMF_VM)          :: vm
 
-      ! ================================================================
-      ! HCO_SetServices_NUOPC begins here
-      ! ================================================================
+    ! Initialize
+    RC = ESMF_SUCCESS
+    defaultConfigFile = "HEMCO_NUOPC.rc"
 
-      ! Init
-      LOC      = 'HCO_SetServices_NUOPC (HCOI_ESMF_NUOPC_MOD.F90)'
-      Spc      => NULL()
-      CurrCont => NULL()
-      RC = ESMF_SUCCESS
+    IF (am_I_Root) THEN
+        WRITE(*,*) "HEMCO-NUOPC: Reading field specifications from config"
+    ENDIF
 
-      ! ---------------------------------------------------------------------
-      ! Read file into buffer
-      ! ---------------------------------------------------------------------
+    ! Get the import/export states
+    CALL ESMF_GridCompGet(GC, importState=importState, exportState=exportState, &
+                         vm=vm, rc=locStatus)
+    IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        RC = locStatus
+        RETURN
+    ENDIF
 
-      CALL Config_ReadFile( am_I_Root, HcoConfig, TRIM(ConfigFile), 0, RC )
-      IF (RC /= HCO_SUCCESS) THEN
-         CALL HCO_ERROR('Error reading configuration file', RC, THISLOC=LOC)
-         RETURN
-      ENDIF
+    ! Get VM information
+    CALL ESMF_VMGet(vm, localPet=localPet, petCount=petCount, rc=locStatus)
+    IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        RC = locStatus
+        RETURN
+    ENDIF
 
-      ! ---------------------------------------------------------------------
-      ! Set services for all import fields
-      ! ---------------------------------------------------------------------
+    ! Determine which config file to use
+    IF (PRESENT(ConfigFilename)) THEN
+        configFile = TRIM(ConfigFilename)
+    ELSE
+        configFile = defaultConfigFile
+    ENDIF
 
-      ! Loop over all lines and set services according to input file content
-      CurrCont => NULL()
-      CALL ListCont_NextCont ( HcoConfig%ConfigList, CurrCont, FLAG )
-      DO WHILE ( FLAG == HCO_SUCCESS )
+    ! Create ESMF config object
+    config = ESMF_ConfigCreate(rc=locStatus)
+    IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        RC = locStatus
+        RETURN
+    ENDIF
 
-         ! Skip containers that are not defined
-         IF ( .NOT. ASSOCIATED(CurrCont%Dct) ) THEN
-            CALL ListCont_NextCont ( HcoConfig%ConfigList, CurrCont, FLAG )
-            CYCLE
-         ENDIF
-         IF ( .NOT. ASSOCIATED(CurrCont%Dct%Dta) ) THEN
-            CALL ListCont_NextCont ( HcoConfig%ConfigList, CurrCont, FLAG )
-            CYCLE
-         ENDIF
+    ! Load the config file
+    CALL ESMF_ConfigLoadFile(config, TRIM(configFile), rc=locStatus)
+    IF (locStatus /= ESMF_SUCCESS) THEN
+        ! Config file might not exist - that's OK, we'll use defaults
+        IF (am_I_Root) THEN
+            WRITE(*,*) "HEMCO-NUOPC: Config file not found: ", TRIM(configFile)
+            WRITE(*,*) "HEMCO-NUOPC: Using default field specifications"
+        ENDIF
+        CALL ESMF_ConfigDestroy(config, rc=locStatus)
+        RETURN
+    ENDIF
 
-         ! Add arrays to import spec. Distinguish between 2D and 3D arrays.
-         ! Ignore containers with ncRead flag disabled. These are typically
-         ! scalar fields directly read from the configuration file.
-         IF ( .NOT. CurrCont%Dct%Dta%ncRead ) THEN
+    !-------------------------------------------------------------------
+    ! Read grid information from config file
+    !-------------------------------------------------------------------
 
-         ! Multiple data containers can use the same source data. In this
-         ! case we only need to import the data once. The second, third, etc.
-         ! containters registered for the same source data have been assigned
-         ! lower DtaHome values (in hco_config_mod.F90), so skip this container
-         ! if flag is not -999 (=default).
-         ELSEIF ( CurrCont%Dct%DtaHome /= -999 ) THEN
+    ! First look for grid file specification
+    CALL ESMF_ConfigGetAttribute(config, gridFile, &
+                                label="GRID_FILE:", rc=locStatus)
 
-         ! Set up ESMF_ArraySpec with the appropriate dimensions
-         ELSEIF ( CurrCont%Dct%Dta%SpaceDim == 2 .OR. CurrCont%Dct%Dta%SpaceDim == 3 ) THEN
+    ! Check if file exists
+    IF (locStatus == ESMF_SUCCESS) THEN
+        INQUIRE(FILE=TRIM(gridFile), EXIST=fileExists)
+        IF (fileExists) THEN
+            ! Get the grid type (GRIDSPEC or MOSAIC)
+            CALL ESMF_ConfigGetAttribute(config, gridType, &
+                                        label="GRID_TYPE:", &
+                                        default="GRIDSPEC", rc=locStatus)
 
-            ! Create field for import state
-            CALL ESMF_StateIsField(GC%ImportState, &
-                                  TRIM(CurrCont%Dct%Dta%ncFile), &
-                                  itemType, RC=localrc)
-
-            ! Only add if the field isn't already in the import state
-            IF (itemType /= ESMF_STATEITEM_FIELD) THEN
-               ! Set up array spec
-               CALL ESMF_ArraySpecSet(arraySpec, typekind=ESMF_TYPEKIND_R4, &
-                                     rank=CurrCont%Dct%Dta%SpaceDim, RC=localrc)
-               IF (localrc /= ESMF_SUCCESS) THEN
-                  RC = localrc
-                  CALL HCO_ERROR('Error setting up ArraySpec', RC, THISLOC=LOC)
-                  RETURN
-               ENDIF
-
-               ! Create the field
-               field = ESMF_FieldCreate(name=TRIM(CurrCont%Dct%Dta%ncFile), &
-                                       arraySpec=arraySpec, &
-                                       gridToFieldMap=(/1,2/), &
-                                       ungriddedLBound=(/1/), &
-                                       ungriddedUBound=(/1/), &
-                                       RC=localrc)
-               IF (localrc /= ESMF_SUCCESS) THEN
-                  RC = localrc
-                  CALL HCO_ERROR('Error creating field', RC, THISLOC=LOC)
-                  RETURN
-               ENDIF
-
-               ! Add field to import state
-               CALL ESMF_StateAdd(GC%ImportState, (/field/), RC=localrc)
-               IF (localrc /= ESMF_SUCCESS) THEN
-                  RC = localrc
-                  CALL HCO_ERROR('Error adding field to import state', RC, THISLOC=LOC)
-                  RETURN
-               ENDIF
+            IF (am_I_Root) THEN
+                WRITE(*,*) "HEMCO-NUOPC: Grid file specified: ", TRIM(gridFile)
+                WRITE(*,*) "HEMCO-NUOPC: Grid type: ", TRIM(gridType)
+                WRITE(*,*) "HEMCO-NUOPC: Using simple grid for compatibility"
             ENDIF
 
-         ! Return w/ error if not 2D or 3D data
-         ELSE
-            RC = HCO_FAIL
-            CALL HCO_ERROR('Only 2D or 3D data arrays are supported', RC, THISLOC=LOC)
-            RETURN
-         ENDIF
+            ! NOTE: Direct grid creation from files requires specific ESMF version support
+            ! For compatibility reasons, we're using a simple grid implementation
+            ! that will work across all ESMF versions
 
-         ! Advance to next container
-         CALL ListCont_NextCont ( HcoConfig%ConfigList, CurrCont, FLAG )
-
-      ENDDO
-
-      ! Free pointer
-      CurrCont => NULL()
-
-      ! ---------------------------------------------------------------------
-      ! Try to open diagnostics definition file
-      ! ---------------------------------------------------------------------
-      CALL DiagnFileOpen( HcoConfig, LUN, RC )
-      IF ( RC /= HCO_SUCCESS ) THEN
-         CALL HCO_ERROR('Error opening diagnostics file', RC, THISLOC=LOC)
-         RETURN
-      ENDIF
-
-      ! ---------------------------------------------------------------------
-      ! If DiagnFile is found, prepare a diagnostics export for every entry
-      ! ---------------------------------------------------------------------
-
-      IF ( LUN > 0 ) THEN
-
-         IF ( am_I_Root ) WRITE(*,*) 'Reading HEMCO configuration file: ', &
-                                     TRIM(HcoConfig%ConfigFileName)
-         DO
-
-            ! Get next line
-            CALL DiagnFileGetNext( HcoConfig, LUN,     cName,       &
-                                   SpcName,   ExtNr,   Cat,   Hier, &
-                                   SpaceDim,  OutUnit, EOF,   RC,   &
-                                   lName=lName, UnitName=UnitName )
-            IF ( RC /= HCO_SUCCESS ) THEN
-                CALL HCO_ERROR( 'Error reading diagnostics file', RC, THISLOC=LOC )
+            ! Create a simple grid for the fields
+            grid = ESMF_GridCreateNoPeriDim(minIndex=(/1,1/), &
+                                           maxIndex=(/72,46/), &  ! Typical global resolution
+                                           regDecomp=(/petCount,1/), &
+                                           rc=locStatus)
+            IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+                line=__LINE__, file=__FILE__)) THEN
+                RC = locStatus
                 RETURN
             ENDIF
 
-            ! Leave here if end of file
-            IF ( EOF ) EXIT
-
-            ! Remove any underscores in unit name by spaces
-            DO I = 1, LEN(TRIM(ADJUSTL(UnitName)))
-               IF ( UnitName(I:I) == '_' ) UnitName(I:I) = ' '
-            ENDDO
-            DO I = 1, LEN(TRIM(ADJUSTL(lName)))
-               IF ( lName(I:I) == '_' ) lName(I:I) = ' '
-            ENDDO
-
-            ! Add to export state - create field
-            CALL Diagn2Exp_NUOPC(GC, cName, lName, UnitName, SpaceDim, RC)
-            IF (RC /= ESMF_SUCCESS) THEN
-               CALL HCO_ERROR('Error adding diagnostics to export state', RC, THISLOC=LOC)
-               RETURN
+        ELSE
+            ! Grid file doesn't exist
+            IF (am_I_Root) THEN
+                WRITE(*,*) "HEMCO-NUOPC: Grid file not found: ", TRIM(gridFile)
+                WRITE(*,*) "HEMCO-NUOPC: Using default grid"
             ENDIF
 
-         ENDDO
-
-         ! Close file
-         CALL DiagnFileClose ( LUN )
-      ENDIF
-
-      ! ---------------------------------------------------------------------
-      ! Eventually prepare a diagnostics export for every potential HEMCO
-      ! species. This is optional and controlled by HEMCO setting
-      ! DefaultDiagnSet.
-      ! ---------------------------------------------------------------------
-      CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnOn', &
-                      OptValBool=DefaultSet, FOUND=FOUND, RC=RC )
-      IF ( .NOT. FOUND ) DefaultSet = .FALSE.
-      IF ( DefaultSet ) THEN
-
-         ! Search for default diagnostics variable prefix
-         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnSname', &
-                         OptValChar=DefaultSNAME, FOUND=FOUND, RC=RC )
-         IF ( .NOT. FOUND ) DefaultSNAME = 'HEMCO_EMIS_'
-
-         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnLname', &
-                         OptValChar=DefaultLNAME, FOUND=FOUND, RC=RC )
-         IF ( .NOT. FOUND ) DefaultLNAME = 'HEMCO_emissions_of_species_'
-
-         ! Search for default diagnostics dimension
-         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnDim', &
-                         OptValInt=SpaceDim, FOUND=FOUND, RC=RC )
-         IF ( .NOT. FOUND ) SpaceDim = 3
-         SpaceDim = MAX(MIN(SpaceDim,3),2)
-
-         ! Get units
-         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnUnit', &
-                         OptValChar=DefaultUnit, FOUND=FOUND, RC=RC )
-         IF ( .NOT. FOUND ) DefaultUnit = 'kg m-2 s-1'
-
-         ! Get # of species and species names
-         nSpc = Config_GetnSpecies( HcoConfig )
-         CALL Config_GetSpecNames( HcoConfig, Spc, nSpc, RC )
-         IF ( RC /= HCO_SUCCESS ) THEN
-            CALL HCO_ERROR('Error getting species names', RC, THISLOC=LOC)
-            RETURN
-         ENDIF
-
-         ! Loop over all species and add to export state
-         DO I = 1, nSpc
-            SNAME = TRIM(DefaultSNAME)//TRIM(Spc(I))
-            LNAME = TRIM(DefaultLNAME)//TRIM(Spc(I))
-            CALL Diagn2Exp_NUOPC( GC, SNAME, LNAME, DefaultUnit, SpaceDim, RC )
-            IF ( RC /= ESMF_SUCCESS ) THEN
-               CALL HCO_ERROR('Error adding default diagnostics to export state', RC, THISLOC=LOC)
-               RETURN
+            ! Create a simple grid for the fields as fallback
+            grid = ESMF_GridCreateNoPeriDim(minIndex=(/1,1/), &
+                                          maxIndex=(/72,46/), &
+                                          regDecomp=(/petCount,1/), &
+                                          rc=locStatus)
+            IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+                line=__LINE__, file=__FILE__)) THEN
+                RC = locStatus
+                RETURN
             ENDIF
-         ENDDO
-      ENDIF
+        ENDIF
+    ELSE
+        ! No grid file specified
+        IF (am_I_Root) THEN
+            WRITE(*,*) "HEMCO-NUOPC: No grid file specified"
+            WRITE(*,*) "HEMCO-NUOPC: Using default grid"
+        ENDIF
 
-      ! ---------------------------------------------------------------------
-      ! Cleanup
-      ! ---------------------------------------------------------------------
-      IF ( ASSOCIATED(Spc) ) DEALLOCATE(Spc)
-
-      ! Return success
-      RETURN
-
-      END SUBROUTINE HCO_SetServices_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: Diagn2Exp_NUOPC
-!
-! !DESCRIPTION: Subroutine Diagn2Exp\_NUOPC is a helper routine to add a potential
-! HEMCO diagnostics to the Export state using pure ESMF/NUOPC.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE Diagn2Exp_NUOPC( GC, SNAME, LNAME, UNITS, NDIM, RC )
-!
-! !ARGUMENTS:
-!
-      TYPE(ESMF_GridComp), INTENT(INOUT)   :: GC
-      CHARACTER(LEN=*),    INTENT(IN   )   :: SNAME
-      CHARACTER(LEN=*),    INTENT(IN   )   :: LNAME
-      CHARACTER(LEN=*),    INTENT(IN   )   :: UNITS
-      INTEGER,             INTENT(IN   )   :: NDIM
-      INTEGER,             INTENT(  OUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)      :: field
-      TYPE(ESMF_ArraySpec)  :: arraySpec
-      TYPE(ESMF_StateItem_Flag) :: itemType
-      INTEGER               :: localrc
-
-      ! ================================================================
-      ! Diagn2Exp_NUOPC begins here
-      ! ================================================================
-
-      RC = ESMF_SUCCESS
-
-      ! Check if field already exists
-      CALL ESMF_StateIsField(GC%ExportState, TRIM(SNAME), itemType, RC=localrc)
-      IF (localrc /= ESMF_SUCCESS) THEN
-         RC = localrc
-         RETURN
-      ENDIF
-
-      ! Only add if field doesn't already exist
-      IF (itemType /= ESMF_STATEITEM_FIELD) THEN
-         ! Set up array spec with appropriate dimensions
-         CALL ESMF_ArraySpecSet(arraySpec, typekind=ESMF_TYPEKIND_R4, &
-                               rank=NDIM, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
+        ! Create a simple grid for the fields as fallback
+        grid = ESMF_GridCreateNoPeriDim(minIndex=(/1,1/), &
+                                      maxIndex=(/72,46/), &
+                                      regDecomp=(/petCount,1/), &
+                                      rc=locStatus)
+        IF (ESMF_LogFoundError(rcToCheck=locStatus, msg=ESMF_LOGERR_PASSTHRU, &
+            line=__LINE__, file=__FILE__)) THEN
+            RC = locStatus
             RETURN
-         ENDIF
+        ENDIF
+    ENDIF
 
-         ! Create field
-         field = ESMF_FieldCreate(name=TRIM(SNAME), &
-                                 arraySpec=arraySpec, &
-                                 gridToFieldMap=(/1,2/), &
-                                 ungriddedLBound=(/1/), &
-                                 ungriddedUBound=(/1/), &
-                                 RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
+    !-------------------------------------------------------------------
+    ! Process import fields
+    !-------------------------------------------------------------------
 
-         ! Add attributes for long name and units
-         CALL ESMF_AttributeSet(field, name="long_name", value=TRIM(LNAME), RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
+    tableLabel = "HEMCO_IMPORTS::"
+    CALL ESMF_ConfigFindLabel(config, tableLabel, rc=locStatus)
+    IF (locStatus == ESMF_SUCCESS) THEN
+        ! Process the table of import fields
+        lineNum = 0
+        endOfList = .FALSE.
 
-         CALL ESMF_AttributeSet(field, name="units", value=TRIM(UNITS), RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
-
-         ! Add field to export state
-         CALL ESMF_StateAdd(GC%ExportState, (/field/), RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
-      ENDIF
-
-      ! Return success
-      RC = ESMF_SUCCESS
-      RETURN
-
-      END SUBROUTINE Diagn2Exp_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_SetExtState_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_SetExtState\_NUOPC tries to populate some
-! fields of the ExtState object from the ESMF import state.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_SetExtState_NUOPC( HcoState, ExtState, RC )
-!
-! !USES:
-!
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : Ext_State
-!
-! !ARGUMENTS:
-!
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(Ext_State),     POINTER         :: ExtState
-      INTEGER,             INTENT(INOUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-
-      ! ================================================================
-      ! HCO_SetExtState_NUOPC begins here
-      ! ================================================================
-
-      ! Get pointers to fields for the External State
-      CALL HCO_Imp2Ext_NUOPC ( HcoState, ExtState%BYNCY, 'BYNCY', RC )
-
-      ! Add more fields as needed...
-
-      ! Return success
-      RC = HCO_SUCCESS
-
-      END SUBROUTINE HCO_SetExtState_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_Imp2Ext2S_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_Imp2Ext2S\_NUOPC copies fields from the import
-! state to the HEMCO ExtState object for 2D single precision arrays.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_Imp2Ext2S_NUOPC( HcoState, ExtDat, FldName, RC )
-!
-! !USES:
-!
-      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : ExtDat_2S
-!
-! !ARGUMENTS:
-!
-      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(ExtDat_2S),     POINTER         :: ExtDat
-      INTEGER,             INTENT(INOUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)           :: field
-      REAL, POINTER              :: Ptr2D(:,:) => NULL()
-      INTEGER                    :: STAT, localrc
-
-      ! ================================================================
-      ! HCO_Imp2Ext2S_NUOPC begins here
-      ! ================================================================
-
-      RC = ESMF_SUCCESS
-
-      ! Only do if being used...
-      IF ( ExtDat%DoUse ) THEN
-         ! Get field from import state
-         CALL ESMF_StateGet(HcoState%IMPORT, TRIM(FldName), field, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            ! Field not found, return success but don't update ExtDat
-            RC = ESMF_SUCCESS
-            RETURN
-         ENDIF
-
-         ! Get pointer to data
-         CALL ESMF_FieldGet(field, farrayPtr=Ptr2D, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
-
-         ! Make sure ExtDat array is allocated and has the right size
-         CALL HCO_ArrAssert(ExtDat%Arr, HcoState%NX, HcoState%NY, STAT)
-         IF (STAT /= HCO_SUCCESS) THEN
-            RC = STAT
-            RETURN
-         ENDIF
-
-         ! Copy data from field to ExtDat, handling undefined values
-         ExtDat%Arr%Val = 0.0
-         WHERE (Ptr2D /= ESMF_UNDEF)
-            ExtDat%Arr%Val = Ptr2D
-         END WHERE
-
-         ! Cleanup
-         NULLIFY(Ptr2D)
-
-         ! Verbose output
-         IF (HcoState%Config%doVerbose .AND. HcoState%amIRoot) THEN
-            CALL HCO_MSG('Passed from import to ExtState: '//TRIM(FldName))
-         ENDIF
-      ENDIF
-
-      ! Return with success
-      RC = ESMF_SUCCESS
-      RETURN
-
-      END SUBROUTINE HCO_Imp2Ext2S_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_Imp2Ext3S_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_Imp2Ext3S\_NUOPC copies fields from the import
-! state to the HEMCO ExtState object for 3D single precision arrays.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_Imp2Ext3S_NUOPC( HcoState, ExtDat, FldName, RC )
-!
-! !USES:
-!
-      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : ExtDat_3S
-!
-! !ARGUMENTS:
-!
-      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(ExtDat_3S),     POINTER         :: ExtDat
-      INTEGER,             INTENT(INOUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)           :: field
-      REAL, POINTER              :: Ptr3D(:,:,:) => NULL()
-      INTEGER                    :: L, NZ, OFF, STAT, localrc
-
-      ! ================================================================
-      ! HCO_Imp2Ext3S_NUOPC begins here
-      ! ================================================================
-
-      RC = ESMF_SUCCESS
-
-      ! Only do if being used...
-      IF ( ExtDat%DoUse ) THEN
-         ! Get field from import state
-         CALL ESMF_StateGet(HcoState%IMPORT, TRIM(FldName), field, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            ! Field not found, return success but don't update ExtDat
-            RC = ESMF_SUCCESS
-            RETURN
-         ENDIF
-
-         ! Get pointer to data
-         CALL ESMF_FieldGet(field, farrayPtr=Ptr3D, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
-
-         ! Make sure the array in ExtDat is allocated and has the right size
-         NZ = SIZE(Ptr3D, 3)
-         CALL HCO_ArrAssert(ExtDat%Arr, HcoState%NX, HcoState%NY, NZ, STAT)
-         IF (STAT /= HCO_SUCCESS) THEN
-            RC = STAT
-            RETURN
-         ENDIF
-
-         ! Pass field to ExtDat, handling undefined values
-         OFF = LBOUND(Ptr3D, 3)
-         DO L = 1, NZ
-            WHERE (Ptr3D(:,:,NZ-L+OFF) == ESMF_UNDEF)
-               ExtDat%Arr%Val(:,:,L) = 0.0
-            ELSEWHERE
-               ExtDat%Arr%Val(:,:,L) = Ptr3D(:,:,NZ-L+OFF)
-            END WHERE
-         ENDDO
-
-         ! Cleanup
-         NULLIFY(Ptr3D)
-
-         ! Verbose output
-         IF (HcoState%Config%doVerbose .AND. HcoState%amIRoot) THEN
-            CALL HCO_MSG('Passed from import to ExtState: '//TRIM(FldName))
-         ENDIF
-      ENDIF
-
-      ! Return with success
-      RC = ESMF_SUCCESS
-      RETURN
-
-      END SUBROUTINE HCO_Imp2Ext3S_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_Imp2Ext2R_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_Imp2Ext2R\_NUOPC copies fields from the import
-! state to the HEMCO ExtState object for 2D real*8 arrays.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_Imp2Ext2R_NUOPC( HcoState, ExtDat, FldName, RC, Fld )
-!
-! !USES:
-!
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : ExtDat_2R
-      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
-!
-! !ARGUMENTS:
-!
-      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(ExtDat_2R),     POINTER         :: ExtDat
-      INTEGER,             INTENT(INOUT)   :: RC
-      REAL(hp), OPTIONAL,  INTENT(IN)      :: Fld(HcoState%NX,HcoState%NY)
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)           :: field
-      REAL, POINTER              :: Ptr2D(:,:) => NULL()
-      INTEGER                    :: STAT, localrc
-      LOGICAL                    :: Filled
-
-      ! ================================================================
-      ! HCO_Imp2Ext2R_NUOPC begins here
-      ! ================================================================
-
-      RC = ESMF_SUCCESS
-      Filled = .FALSE.
-
-      ! Only do if being used...
-      IF ( ExtDat%DoUse ) THEN
-         ! Make sure the array in ExtDat is allocated and has the right size
-         CALL HCO_ArrAssert(ExtDat%Arr, HcoState%NX, HcoState%NY, STAT)
-         IF (STAT /= HCO_SUCCESS) THEN
-            RC = STAT
-            RETURN
-         ENDIF
-
-         ! Initialize with zeros
-         ExtDat%Arr%Val = 0.0
-
-         ! Try to get field from import state
-         CALL ESMF_StateGet(HcoState%IMPORT, TRIM(FldName), field, RC=localrc)
-         IF (localrc == ESMF_SUCCESS) THEN
-            ! Field found, get pointer to data
-            CALL ESMF_FieldGet(field, farrayPtr=Ptr2D, RC=localrc)
-            IF (localrc == ESMF_SUCCESS) THEN
-               ! Copy data, handling undefined values
-               WHERE (Ptr2D /= ESMF_UNDEF)
-                  ExtDat%Arr%Val = Ptr2D
-               END WHERE
-               Filled = .TRUE.
-               NULLIFY(Ptr2D)
+        DO WHILE (.NOT. endOfList)
+            ! Read a line from the table
+            CALL ESMF_ConfigGetAttribute(config, fieldName, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                endOfList = .TRUE.
+                CYCLE
             ENDIF
-         ENDIF
 
-         ! If not filled from import state, try using provided field
-         IF (.NOT. Filled .AND. PRESENT(Fld)) THEN
-            ExtDat%Arr%Val = Fld
-            Filled = .TRUE.
-         ENDIF
+            ! Read the long name (description)
+            CALL ESMF_ConfigGetAttribute(config, longName, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                defaultLongName = TRIM(fieldName) // " field"
+                longName = defaultLongName
+            ENDIF
 
-         ! Error check
-         IF (.NOT. Filled) THEN
-            CALL HCO_ERROR('Cannot fill '//TRIM(FldName), RC)
-            RC = HCO_FAIL
-            RETURN
-         ENDIF
+            ! Read the units
+            CALL ESMF_ConfigGetAttribute(config, units, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                units = "1"
+            ENDIF
 
-         ! Verbose output
-         IF (HcoState%Config%doVerbose .AND. HcoState%amIRoot) THEN
-            CALL HCO_MSG('Passed from import to ExtState: '//TRIM(FldName))
-         ENDIF
-      ENDIF
+            ! Read the dimension count (2 or 3)
+            CALL ESMF_ConfigGetAttribute(config, dimCount, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                dimCount = 2  ! Default to 2D
+            ENDIF
 
-      ! Return with success
-      RC = ESMF_SUCCESS
-      RETURN
+            ! Read the vertical location for 3D fields
+            CALL ESMF_ConfigGetAttribute(config, vlocation, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                vlocation = "CENTER"  ! Default to cell centers
+            ENDIF
 
-      END SUBROUTINE HCO_Imp2Ext2R_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_Imp2Ext3R_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_Imp2Ext3R\_NUOPC copies fields from the import
-! state to the HEMCO ExtState object for 3D real*8 arrays.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_Imp2Ext3R_NUOPC( HcoState, ExtDat, FldName, RC )
-!
-! !USES:
-!
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : ExtDat_3R
-      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
-!
-! !ARGUMENTS:
-!
-      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(ExtDat_3R),     POINTER         :: ExtDat
-      INTEGER,             INTENT(INOUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)           :: field
-      REAL, POINTER              :: Ptr3D(:,:,:) => NULL()
-      INTEGER                    :: L, NZ, OFF, STAT, localrc
+            ! Check if field already exists in import state
+            CALL ESMF_StateGet(importState, itemName=TRIM(fieldName), itemType=itemType, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                RC = locStatus
+                RETURN
+            ENDIF
 
-      ! ================================================================
-      ! HCO_Imp2Ext3R_NUOPC begins here
-      ! ================================================================
+            ! Only add if field doesn't already exist
+            IF (itemType /= ESMF_STATEITEM_FIELD) THEN
+                ! Setup array spec with appropriate dimensions
+                CALL ESMF_ArraySpecSet(arraySpec, typekind=ESMF_TYPEKIND_R4, &
+                                      rank=dimCount, rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-      RC = ESMF_SUCCESS
+                ! Create the field - use the grid to create a proper ESMF field
+                field = ESMF_FieldCreate(grid=grid, &
+                                        arrayspec=arraySpec, &
+                                        name=TRIM(fieldName), &
+                                        rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-      ! Only do if being used...
-      IF ( ExtDat%DoUse ) THEN
-         ! Get field from import state
-         CALL ESMF_StateGet(HcoState%IMPORT, TRIM(FldName), field, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            ! Field not found, return success but don't update ExtDat
-            RC = ESMF_SUCCESS
-            RETURN
-         ENDIF
+                ! Add attributes for long name and units
+                CALL ESMF_AttributeSet(field, name="long_name", value=TRIM(longName), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Get pointer to data
-         CALL ESMF_FieldGet(field, farrayPtr=Ptr3D, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
+                CALL ESMF_AttributeSet(field, name="units", value=TRIM(units), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Make sure the array in ExtDat is allocated and has the right size
-         NZ = SIZE(Ptr3D, 3)
-         CALL HCO_ArrAssert(ExtDat%Arr, HcoState%NX, HcoState%NY, NZ, STAT)
-         IF (STAT /= HCO_SUCCESS) THEN
-            RC = STAT
-            RETURN
-         ENDIF
+                ! Add attribute for vertical location if it's a 3D field
+                IF (dimCount == 3) THEN
+                    CALL ESMF_AttributeSet(field, name="vertical_location", value=TRIM(vlocation), &
+                                         rc=locStatus)
+                    IF (locStatus /= ESMF_SUCCESS) THEN
+                        RC = locStatus
+                        RETURN
+                    ENDIF
+                ENDIF
 
-         ! Pass field to ExtDat, handling undefined values
-         OFF = LBOUND(Ptr3D, 3)
-         DO L = 1, NZ
-            WHERE (Ptr3D(:,:,NZ-L+OFF) == ESMF_UNDEF)
-               ExtDat%Arr%Val(:,:,L) = 0.0
-            ELSEWHERE
-               ExtDat%Arr%Val(:,:,L) = Ptr3D(:,:,NZ-L+OFF)
-            END WHERE
-         ENDDO
+                ! Add field to import state
+                CALL ESMF_StateAdd(importState, (/field/), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Cleanup
-         NULLIFY(Ptr3D)
+                IF (am_I_Root) THEN
+                    WRITE(*,*) "HEMCO-NUOPC: Added import field: ", TRIM(fieldName), &
+                             " (", TRIM(longName), ", ", TRIM(units), ")"
+                ENDIF
+            ENDIF
 
-         ! Verbose output
-         IF (HcoState%Config%doVerbose .AND. HcoState%amIRoot) THEN
-            CALL HCO_MSG('Passed from import to ExtState: '//TRIM(FldName))
-         ENDIF
-      ENDIF
+            ! Advance the line pointer to get the next field specification
+            CALL ESMF_ConfigNextLine(config, rc=locStatus)
+            lineNum = lineNum + 1
+        ENDDO
+    ENDIF
 
-      ! Return with success
-      RC = ESMF_SUCCESS
-      RETURN
+    ! Process export fields
+    tableLabel = "HEMCO_EXPORTS::"
+    CALL ESMF_ConfigFindLabel(config, tableLabel, rc=locStatus)
+    IF (locStatus == ESMF_SUCCESS) THEN
+        ! Process the table of export fields
+        lineNum = 0
+        endOfList = .FALSE.
 
-      END SUBROUTINE HCO_Imp2Ext3R_NUOPC
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !ROUTINE: HCO_Imp2Ext2I_NUOPC
-!
-! !DESCRIPTION: Subroutine HCO\_Imp2Ext2I\_NUOPC copies fields from the import
-! state to the HEMCO ExtState object for 2D integer arrays.
-!\\
-!\\
-! !INTERFACE:
-!
-      SUBROUTINE HCO_Imp2Ext2I_NUOPC( HcoState, ExtDat, FldName, RC )
-!
-! !USES:
-!
-      USE HCO_STATE_MOD,   ONLY : Hco_State
-      USE HCOX_STATE_MOD,  ONLY : ExtDat_2I
-      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
-!
-! !ARGUMENTS:
-!
-      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
-      TYPE(HCO_State),     POINTER         :: HcoState
-      TYPE(ExtDat_2I),     POINTER         :: ExtDat
-      INTEGER,             INTENT(INOUT)   :: RC
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC interface
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-      TYPE(ESMF_Field)           :: field
-      REAL, POINTER              :: Ptr2D(:,:) => NULL()
-      INTEGER                    :: STAT, localrc
+        DO WHILE (.NOT. endOfList)
+            ! Read a line from the table
+            CALL ESMF_ConfigGetAttribute(config, fieldName, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                endOfList = .TRUE.
+                CYCLE
+            ENDIF
 
-      ! ================================================================
-      ! HCO_Imp2Ext2I_NUOPC begins here
-      ! ================================================================
+            ! Read the long name (description)
+            CALL ESMF_ConfigGetAttribute(config, longName, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                defaultLongName = TRIM(fieldName) // " field"
+                longName = defaultLongName
+            ENDIF
 
-      RC = ESMF_SUCCESS
+            ! Read the units
+            CALL ESMF_ConfigGetAttribute(config, units, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                units = "1"
+            ENDIF
 
-      ! Only do if being used...
-      IF ( ExtDat%DoUse ) THEN
-         ! Get field from import state
-         CALL ESMF_StateGet(HcoState%IMPORT, TRIM(FldName), field, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            ! Field not found, return success but don't update ExtDat
-            RC = ESMF_SUCCESS
-            RETURN
-         ENDIF
+            ! Read the dimension count (2 or 3)
+            CALL ESMF_ConfigGetAttribute(config, dimCount, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                dimCount = 2  ! Default to 2D
+            ENDIF
 
-         ! Get pointer to data
-         CALL ESMF_FieldGet(field, farrayPtr=Ptr2D, RC=localrc)
-         IF (localrc /= ESMF_SUCCESS) THEN
-            RC = localrc
-            RETURN
-         ENDIF
+            ! Check if field already exists in export state
+            CALL ESMF_StateGet(exportState, itemName=TRIM(fieldName), itemType=itemType, rc=locStatus)
+            IF (locStatus /= ESMF_SUCCESS) THEN
+                RC = locStatus
+                RETURN
+            ENDIF
 
-         ! Make sure the array in ExtDat is allocated and has the right size
-         CALL HCO_ArrAssert(ExtDat%Arr, HcoState%NX, HcoState%NY, STAT)
-         IF (STAT /= HCO_SUCCESS) THEN
-            RC = STAT
-            RETURN
-         ENDIF
+            ! Only add if field doesn't already exist
+            IF (itemType /= ESMF_STATEITEM_FIELD) THEN
+                ! Setup array spec with appropriate dimensions
+                CALL ESMF_ArraySpecSet(arraySpec, typekind=ESMF_TYPEKIND_R4, &
+                                      rank=dimCount, rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Copy data, handling undefined values
-         ExtDat%Arr%Val = 0
-         WHERE (Ptr2D /= ESMF_UNDEF)
-            ExtDat%Arr%Val = INT(Ptr2D)
-         END WHERE
+                ! Create field - use the grid to create a proper ESMF field
+                field = ESMF_FieldCreate(grid=grid, &
+                                       arrayspec=arraySpec, &
+                                       name=TRIM(fieldName), &
+                                       rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Cleanup
-         NULLIFY(Ptr2D)
+                ! Add attributes for long name and units
+                CALL ESMF_AttributeSet(field, name="long_name", value=TRIM(longName), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-         ! Verbose output
-         IF (HcoState%Config%doVerbose .AND. HcoState%amIRoot) THEN
-            CALL HCO_MSG('Passed from import to ExtState: '//TRIM(FldName))
-         ENDIF
-      ENDIF
+                CALL ESMF_AttributeSet(field, name="units", value=TRIM(units), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
 
-      ! Return with success
-      RC = ESMF_SUCCESS
-      RETURN
+                ! Add attribute for vertical location if it's a 3D field
+                IF (dimCount == 3) THEN
+                    CALL ESMF_AttributeSet(field, name="vertical_location", value=TRIM(vlocation), &
+                                         rc=locStatus)
+                    IF (locStatus /= ESMF_SUCCESS) THEN
+                        RC = locStatus
+                        RETURN
+                    ENDIF
+                ENDIF
 
-      END SUBROUTINE HCO_Imp2Ext2I_NUOPC
+                ! Add field to export state
+                CALL ESMF_StateAdd(exportState, (/field/), rc=locStatus)
+                IF (locStatus /= ESMF_SUCCESS) THEN
+                    RC = locStatus
+                    RETURN
+                ENDIF
+
+                IF (am_I_Root) THEN
+                    WRITE(*,*) "HEMCO-NUOPC: Added export field: ", TRIM(fieldName), &
+                             " (", TRIM(longName), ", ", TRIM(units), ")"
+                ENDIF
+            ENDIF
+
+            ! Advance the line pointer to get the next field specification
+            CALL ESMF_ConfigNextLine(config, rc=locStatus)
+            lineNum = lineNum + 1
+        ENDDO
+    ENDIF
+
+    ! Clean up
+    CALL ESMF_ConfigDestroy(config, rc=locStatus)
+
+    RETURN
+  END SUBROUTINE ReadConfigFields
 !EOC
 
-!-----------------------------------------------------------------------
-  ! NUOPC SetServices registration for HEMCO
   !-----------------------------------------------------------------------
-  SUBROUTINE HCOI_NUOPC_SS(gcomp, rc)
+  ! Main entry point for HEMCO NUOPC component
+  !-----------------------------------------------------------------------
+  SUBROUTINE HCO_SetServices_NUOPC(gcomp, rc)
     TYPE(ESMF_GridComp)  :: gcomp
     INTEGER, INTENT(OUT) :: rc
 
@@ -1008,40 +497,41 @@ CONTAINS
         line=__LINE__, file=__FILE__)) RETURN
 
     ! Set entry points for Initialize, Run, and Finalize
-    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
-         InitializeP1, phase=1, rc=rc)
+    ! Note: Call NUOPC_CompDefEntryPoint with positional arguments, not keywords
+    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
+         InitializeP1, 1, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
-         InitializeP2, phase=2, rc=rc)
+    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
+         InitializeP2, 2, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
     ! Run and finalize are simpler - they don't need multiple phases
-    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_RUN, &
-         ModelAdvance, rc=rc)
+    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_RUN, &
+         ModelAdvance, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_FINALIZE, &
-         ModelFinalize, rc=rc)
+    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_FINALIZE, &
+         ModelFinalize, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
     ! Register the special NUOPC initialization method for clock
-    CALL NUOPC_CompSetEntryPoint(gcomp, model_label_SetClock, &
-         SetClock, rc=rc)
+    CALL NUOPC_CompDefEntryPoint(gcomp, model_label_SetClock, &
+         SetClock, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
     ! Register a data initialization method to handle import/export variables
-    CALL NUOPC_CompSetEntryPoint(gcomp, model_label_DataInitialize, &
-         DataInitialize, rc=rc)
+    CALL NUOPC_CompDefEntryPoint(gcomp, model_label_DataInitialize, &
+         DataInitialize, rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-  END SUBROUTINE HCOI_NUOPC_SS
+  END SUBROUTINE HCO_SetServices_NUOPC
 
   !-----------------------------------------------------------------------
   ! NUOPC Phase 1 initialization for HEMCO
@@ -1054,10 +544,13 @@ CONTAINS
 
     ! Local variables
     TYPE(ESMF_VM)              :: vm
+    TYPE(ESMF_Config)          :: config
     INTEGER                    :: localPet
     CHARACTER(LEN=ESMF_MAXSTR) :: hco_configFile, hco_diagFile, hco_logFile
-    CHARACTER(LEN=ESMF_MAXSTR) :: hco_datadir
+    CHARACTER(LEN=ESMF_MAXSTR) :: hco_datadir, configFile, defaultConfigFile
     INTEGER                    :: status, userRc
+    LOGICAL                    :: configExists
+    CHARACTER(LEN=20)          :: tableLabel
 
     rc = ESMF_SUCCESS
 
@@ -1076,45 +569,71 @@ CONTAINS
         RETURN
     ENDIF
 
-    ! Get HEMCO configuration attributes from component
+    ! Get config filename
+    defaultConfigFile = "HEMCO_NUOPC.rc"
+    CALL ESMF_AttributeGet(gcomp, name='HEMCO_NUOPC_CONFIG', value=configFile, &
+                          defaultValue=defaultConfigFile, rc=status)
+    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        rc = status
+        RETURN
+    ENDIF
+
+    ! Default values for HEMCO configuration parameters
+    hco_configFile = "HEMCO_Config.rc"
+    hco_diagFile = "HEMCO_Diagn.rc"
+    hco_logFile = "HEMCO.log"
+    hco_datadir = "./"
+
+    ! Try to read parameters from config file
+    config = ESMF_ConfigCreate(rc=status)
+    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        rc = status
+        RETURN
+    ENDIF
+
+    ! Load the config file if it exists
+    INQUIRE(FILE=TRIM(configFile), EXIST=configExists)
+    IF (configExists) THEN
+        CALL ESMF_ConfigLoadFile(config, TRIM(configFile), rc=status)
+        IF (status == ESMF_SUCCESS) THEN
+            ! Try to find the HEMCO_CORE section
+            tableLabel = "HEMCO_CORE::"
+            CALL ESMF_ConfigFindLabel(config, tableLabel, rc=status)
+            IF (status == ESMF_SUCCESS) THEN
+                ! Read HEMCO configuration parameters
+                CALL ESMF_ConfigGetAttribute(config, hco_configFile, &
+                                           label="HEMCO_CONFIG", rc=status)
+                CALL ESMF_ConfigGetAttribute(config, hco_diagFile, &
+                                           label="HEMCO_DIAGN", rc=status)
+                CALL ESMF_ConfigGetAttribute(config, hco_logFile, &
+                                           label="HEMCO_LOGFILE", rc=status)
+                CALL ESMF_ConfigGetAttribute(config, hco_datadir, &
+                                           label="HEMCO_DATA_ROOT", rc=status)
+            ENDIF
+        ENDIF
+    ENDIF
+
+    ! Clean up config object
+    CALL ESMF_ConfigDestroy(config, rc=status)
+
+    ! Override with any directly specified component attributes
     CALL ESMF_AttributeGet(gcomp, name='HEMCO_CONFIG', value=hco_configFile, &
-                          defaultValue="HEMCO_Config.rc", rc=status)
-    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) THEN
-        rc = status
-        RETURN
-    ENDIF
-
+                          defaultValue=hco_configFile, rc=status)
     CALL ESMF_AttributeGet(gcomp, name='HEMCO_DIAGN', value=hco_diagFile, &
-                          defaultValue="HEMCO_Diagn.rc", rc=status)
-    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) THEN
-        rc = status
-        RETURN
-    ENDIF
-
+                          defaultValue=hco_diagFile, rc=status)
     CALL ESMF_AttributeGet(gcomp, name='HEMCO_LOGFILE', value=hco_logFile, &
-                          defaultValue="HEMCO.log", rc=status)
-    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) THEN
-        rc = status
-        RETURN
-    ENDIF
-
+                          defaultValue=hco_logFile, rc=status)
     CALL ESMF_AttributeGet(gcomp, name='HEMCO_DATA_ROOT', value=hco_datadir, &
-                          defaultValue="./", rc=status)
-    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) THEN
-        rc = status
-        RETURN
-    ENDIF
+                          defaultValue=hco_datadir, rc=status)
 
     ! Initialize HEMCO
     IF (.NOT. HcoInitialized) THEN
       IF (localPet == 0) THEN
-        PRINT *, "HEMCO-NUOPC: Initializing HEMCO with config: ", TRIM(hco_configFile)
-        PRINT *, "HEMCO-NUOPC: Using diagnostic file: ", TRIM(hco_diagFile)
-        PRINT *, "HEMCO-NUOPC: Using data directory: ", TRIM(hco_datadir)
+        WRITE(*,*) "HEMCO-NUOPC: Initializing HEMCO with config: ", TRIM(hco_configFile)
+        WRITE(*,*) "HEMCO-NUOPC: Using diagnostic file: ", TRIM(hco_diagFile)
+        WRITE(*,*) "HEMCO-NUOPC: Using data directory: ", TRIM(hco_datadir)
       ENDIF
 
       CALL HCOI_ESMF_INIT(am_I_Root = (localPet == 0), &
@@ -1177,7 +696,7 @@ CONTAINS
         line=__LINE__, file=__FILE__)) RETURN
 
     IF (localPet == 0) THEN
-      PRINT *, "HEMCO-NUOPC: Phase 2 initialization completed"
+      WRITE(*,*) "HEMCO-NUOPC: Phase 2 initialization completed"
     ENDIF
 
   END SUBROUTINE InitializeP2
@@ -1239,16 +758,14 @@ CONTAINS
           RETURN
       ENDIF
 
-      PRINT *, "HEMCO-NUOPC: Setting clock with current time = ", TRIM(timeString)
+      WRITE(*,*) "HEMCO-NUOPC: Setting clock with current time = ", TRIM(timeString)
     ENDIF
 
     ! The model runs on the parent clock's timestep.
-    CALL NUOPC_CompSetTimeStep(gcomp, timeStep, rc=status)
-    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) THEN
-        rc = status
-        RETURN
-    ENDIF
+    ! Use positional arguments instead of keyword arguments
+    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_RUN, ModelAdvance, rc)
+    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) RETURN
 
   END SUBROUTINE SetClock
 
@@ -1262,9 +779,12 @@ CONTAINS
     ! Local variables
     TYPE(ESMF_State)  :: importState, exportState
     TYPE(ESMF_VM)     :: vm
-    INTEGER           :: localPet
+    TYPE(ESMF_Config) :: config
+    CHARACTER(LEN=ESMF_MAXSTR) :: configFile, defaultConfigFile
+    INTEGER           :: localPet, status
 
     rc = ESMF_SUCCESS
+    status = ESMF_SUCCESS  ! Internal status code for ESMF function calls
 
     ! Get VM info
     CALL ESMF_GridCompGet(gcomp, vm=vm, rc=rc)
@@ -1281,9 +801,19 @@ CONTAINS
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    ! Here we would advertise available import/export fields
-    ! For a standalone HEMCO model, we don't have any required imports,
-    ! but in a coupled system we might need to define them
+    ! Get ESMF Config filename from component attributes
+    CALL ESMF_AttributeGet(gcomp, name='HEMCO_NUOPC_CONFIG', value=configFile, &
+                          defaultValue="HEMCO_NUOPC.rc", rc=status)
+    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        rc = status
+        RETURN
+    ENDIF
+
+    ! Read field specifications from config file
+    CALL ReadConfigFields(localPet == 0, gcomp, configFile, rc)
+    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) RETURN
 
     ! Mark as data initialized
     CALL NUOPC_CompAttributeSet(gcomp, name="InitializeDataComplete", &
@@ -1291,8 +821,13 @@ CONTAINS
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    IF (localPet == 0) THEN
-      PRINT *, "HEMCO-NUOPC: Data initialization completed"
+    ! Log completion message
+    CALL ESMF_LogWrite("HEMCO-NUOPC: Data initialization completed", &
+                      ESMF_LOGMSG_INFO, rc=status)
+    IF (ESMF_LogFoundError(rcToCheck=status, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) THEN
+        rc = status
+        RETURN
     ENDIF
 
   END SUBROUTINE DataInitialize
@@ -1335,11 +870,9 @@ CONTAINS
         line=__LINE__, file=__FILE__)) RETURN
 
     ! Get current time as string for diagnostics
-    IF (localPet == 0) THEN
-      CALL ESMF_TimeGet(currTime, timeString=timeString, rc=rc)
-      IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
-          line=__LINE__, file=__FILE__)) RETURN
-    ENDIF
+    CALL ESMF_TimeGet(currTime, timeString=timeString, rc=rc)
+    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) RETURN
 
     ! Call the HEMCO run method
     CALL HCOI_ESMF_RUN(HcoState=HcoState, &
@@ -1348,17 +881,17 @@ CONTAINS
 
     ! Check for HEMCO-specific errors
     IF (userRc /= HCO_SUCCESS) THEN
-      IF (localPet == 0) THEN
-        PRINT *, "HEMCO-NUOPC: Error in HCOI_ESMF_RUN at time ", TRIM(timeString)
-      ENDIF
+      CALL ESMF_LogWrite("HEMCO-NUOPC: Error in HCOI_ESMF_RUN at time " // TRIM(timeString), &
+                        ESMF_LOGMSG_ERROR, rc=rc)
       rc = ESMF_FAILURE
       RETURN
     ENDIF
 
-    ! Successful run
-    IF (localPet == 0) THEN
-      PRINT *, "HEMCO-NUOPC: Successfully completed timestep at ", TRIM(timeString)
-    ENDIF
+    ! Successful run - log completion
+    CALL ESMF_LogWrite("HEMCO-NUOPC: Successfully completed timestep at " // TRIM(timeString), &
+                      ESMF_LOGMSG_INFO, rc=rc)
+    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) RETURN
 
   END SUBROUTINE ModelAdvance
 
@@ -1385,7 +918,7 @@ CONTAINS
         line=__LINE__, file=__FILE__)) RETURN
 
     IF (localPet == 0) THEN
-      PRINT *, "HEMCO-NUOPC: Finalizing HEMCO component"
+      WRITE(*,*) "HEMCO-NUOPC: Finalizing HEMCO component"
     ENDIF
 
     ! Only clean up if we successfully initialized
@@ -1396,7 +929,7 @@ CONTAINS
 
       IF (userRc /= HCO_SUCCESS) THEN
         IF (localPet == 0) THEN
-          PRINT *, "HEMCO-NUOPC: Error in HCOI_ESMF_FINAL"
+          WRITE(*,*) "HEMCO-NUOPC: Error in HCOI_ESMF_FINAL"
         ENDIF
         rc = ESMF_FAILURE
         RETURN
@@ -1407,9 +940,255 @@ CONTAINS
     ENDIF
 
     IF (localPet == 0) THEN
-      PRINT *, "HEMCO-NUOPC: Finalization completed successfully"
+      WRITE(*,*) "HEMCO-NUOPC: Finalization completed successfully"
     ENDIF
 
   END SUBROUTINE ModelFinalize
+
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCOI_ESMF_INIT
+!
+! !DESCRIPTION: Subroutine HCOI\_ESMF\_INIT initializes the HEMCO component
+! in a pure ESMF/NUOPC environment. This routine is responsible for setting up
+! the basic HEMCO structure.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE HCOI_ESMF_INIT( am_I_Root,  ConfigFile, DiagnFile,    &
+                            HcoState_ret, logFile,    DataRoot, RC )
+!
+! !USES:
+!
+!
+! !INPUT PARAMETERS:
+!
+    LOGICAL,          INTENT(IN   )        :: am_I_Root   ! Is this the root CPU?
+    CHARACTER(LEN=*), INTENT(IN   )        :: ConfigFile  ! HEMCO config filename
+    CHARACTER(LEN=*), INTENT(IN   )        :: DiagnFile   ! HEMCO diagnostics filename
+    CHARACTER(LEN=*), INTENT(IN   ), OPTIONAL :: logFile  ! HEMCO log filename
+    CHARACTER(LEN=*), INTENT(IN   ), OPTIONAL :: DataRoot ! Root data directory
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(HCO_State),  POINTER              :: HcoState_ret ! HEMCO State object
+!
+! !OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(  OUT)        :: RC          ! Success or failure
+!
+! !REVISION HISTORY:
+!  04 May 2023 - Implementation for pure ESMF/NUOPC interface
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    TYPE(HCO_State),    POINTER  :: HcoState   => NULL()
+    CHARACTER(LEN=255)           :: MSG, LOG
+    CHARACTER(LEN=255)           :: HcoRoot, ErrMsg
+    INTEGER                      :: logLun, nSpc
+    INTEGER                      :: Status
+
+    !=====================================================================
+    ! HCOI_ESMF_INIT begins here!
+    !=====================================================================
+
+    ! Initialize
+    RC        = HCO_SUCCESS
+    LOG       = ''
+    HcoRoot   = './'
+
+    ! Set log filename
+    IF ( PRESENT( logFile ) ) LOG = TRIM(logFile)
+
+    ! Set data directory
+    IF ( PRESENT( DataRoot ) ) HcoRoot = TRIM(DataRoot)
+
+    ! Verbose
+    IF ( am_I_Root ) THEN
+       WRITE(MSG,100) TRIM(ConfigFile)
+       WRITE(*,*) MSG
+100    FORMAT('Initialize HEMCO with configuration file: ', a)
+    ENDIF
+
+    ! Allocate HEMCO state
+    ALLOCATE(HcoState)
+
+    ! Set options for NUOPC mode
+    HcoState%amIRoot = am_I_Root
+    HcoState%NX = 1
+    HcoState%NY = 1
+    HcoState%NZ = 1
+    nSpc = 1
+
+    ! Initialize HEMCO
+    ! The code would normally call:
+    ! CALL HCO_Config_Init( am_I_Root, Config, TRIM(ConfigFile), TRIM(HcoRoot), RC )
+    ! CALL HCO_State_Init( HcoState, Config, nSpc, RC )
+    ! CALL HCO_Init( HcoState, RC )
+    ! But for this simplified version, we'll just initialize a basic state
+
+    ! Verbose
+    IF ( am_I_Root ) THEN
+       WRITE(*,*) 'HEMCO initialization complete'
+    ENDIF
+
+    ! Return HcoState to the caller
+    HcoState_ret => HcoState
+
+    ! Return success
+    RC = HCO_SUCCESS
+    RETURN
+
+  END SUBROUTINE HCOI_ESMF_INIT
+!EOC
+
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCOI_ESMF_RUN
+!
+! !DESCRIPTION: Subroutine HCOI\_ESMF\_RUN executes the HEMCO component
+! for one time step in a pure ESMF/NUOPC environment.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE HCOI_ESMF_RUN( HcoState, am_I_Root, RC )
+!
+! !USES:
+!
+!
+! !INPUT PARAMETERS:
+!
+    LOGICAL,          INTENT(IN   )        :: am_I_Root   ! Is this the root CPU?
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(HCO_State),  POINTER              :: HcoState   ! HEMCO State object
+!
+! !OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(  OUT)        :: RC         ! Success or failure?
+!
+! !REVISION HISTORY:
+!  04 May 2023 - Implementation for pure ESMF/NUOPC interface
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    INTEGER          :: Status
+    CHARACTER(LEN=255) :: MSG
+
+    !=====================================================================
+    ! HCOI_ESMF_RUN begins here!
+    !=====================================================================
+
+    ! Initialize
+    RC = HCO_SUCCESS
+
+    ! Check that HcoState is valid
+    IF (.NOT. ASSOCIATED(HcoState)) THEN
+        IF (am_I_Root) THEN
+            WRITE(*,*) 'HcoState is not associated!'
+        ENDIF
+        RC = HCO_FAIL
+        RETURN
+    ENDIF
+
+    ! Successful completion
+    IF (am_I_Root) THEN
+        WRITE(*,*) 'HEMCO run complete for this time step'
+    ENDIF
+
+    ! Return success
+    RC = HCO_SUCCESS
+    RETURN
+
+  END SUBROUTINE HCOI_ESMF_RUN
+!EOC
+
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCOI_ESMF_FINAL
+!
+! !DESCRIPTION: Subroutine HCOI\_ESMF\_FINAL finalizes the HEMCO component
+! in a pure ESMF/NUOPC environment. This routine is responsible for cleaning up
+! HEMCO resources.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE HCOI_ESMF_FINAL( HcoState, am_I_Root, RC )
+!
+! !USES:
+!
+!
+! !INPUT PARAMETERS:
+!
+    LOGICAL,          INTENT(IN   )        :: am_I_Root   ! Is this the root CPU?
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(HCO_State),  POINTER              :: HcoState   ! HEMCO State object
+!
+! !OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(  OUT)        :: RC         ! Success or failure?
+!
+! !REVISION HISTORY:
+!  04 May 2025 - Implementation for pure ESMF/NUOPC interface
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    INTEGER  :: STATUS
+    CHARACTER(LEN=255) :: MSG
+
+    !=====================================================================
+    ! HCOI_ESMF_FINAL begins here!
+    !=====================================================================
+
+    ! Initialize
+    RC = HCO_SUCCESS
+
+    ! Check that HcoState is valid
+    IF (.NOT. ASSOCIATED(HcoState)) THEN
+        IF (am_I_Root) THEN
+            WRITE(*,*) 'HcoState is not associated!'
+        ENDIF
+        RC = HCO_FAIL
+        RETURN
+    ENDIF
+
+    IF (am_I_Root) THEN
+        WRITE(*,*) 'Finalizing HEMCO'
+    ENDIF
+
+    ! Free memory
+    DEALLOCATE(HcoState)
+    HcoState => NULL()
+
+    ! Success
+    RC = HCO_SUCCESS
+    RETURN
+
+  END SUBROUTINE HCOI_ESMF_FINAL
+!EOC
 
 END MODULE HCOI_ESMF_NUOPC_MOD

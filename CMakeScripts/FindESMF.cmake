@@ -7,6 +7,8 @@
 #  ESMF_INCLUDE_DIRS - paths to ESMF include directories
 #  ESMF_LIBRARIES - paths to ESMF libraries
 #  ESMF_VERSION - ESMF version if available
+#  NUOPC_FOUND - set to true if NUOPC is found
+#  NUOPC_LIBRARIES - paths to NUOPC libraries
 #
 # If ESMF is not found, this module will attempt to find it using:
 # 1. The ESMFMKFILE environment variable (best method)
@@ -62,11 +64,22 @@ function(parse_esmfmkfile MKFILE OUTPUT_INCLUDES OUTPUT_LIBS OUTPUT_VERSION)
         list(APPEND libraries "-L${path}" "-l${name}")
       endif()
     endforeach()
+
+    # Explicitly check for NUOPC library in the same path
+    if(EXISTS "${path}/libnuopc.so" OR EXISTS "${path}/libnuopc.a")
+      # Add NUOPC library explicitly
+      set(NUOPC_FOUND TRUE PARENT_SCOPE)
+      list(APPEND libraries "-L${path}" "-lnuopc")
+      message(STATUS "Found NUOPC library at ${path}")
+    endif()
   endforeach()
 
   # If no libraries found but we have lib_names, use them directly
   if(NOT libraries AND lib_names)
     set(libraries ${lib_names})
+    # Also add NUOPC if we're in default library mode
+    list(APPEND libraries "-lnuopc")
+    set(NUOPC_FOUND TRUE PARENT_SCOPE)
   endif()
 
   # Set return values
@@ -79,6 +92,9 @@ endfunction()
 if(NOT DEFINED ESMFMKFILE)
   set(ESMFMKFILE $ENV{ESMFMKFILE})
 endif()
+
+# Initialize NUOPC_FOUND to FALSE
+set(NUOPC_FOUND FALSE)
 
 if(ESMFMKFILE)
   if(EXISTS ${ESMFMKFILE})
@@ -116,9 +132,23 @@ if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
                    PATHS ${ESMF_ROOT}/lib ${ESMF_ROOT}/lib64
                    NO_DEFAULT_PATH)
 
+      # Explicitly look for NUOPC library
+      find_library(NUOPC_LIBRARY
+                   NAMES nuopc
+                   PATHS ${ESMF_ROOT}/lib ${ESMF_ROOT}/lib64
+                   NO_DEFAULT_PATH)
+
       if(ESMF_INCLUDE_DIR AND ESMF_LIBRARY)
         set(ESMF_INCLUDE_DIRS ${ESMF_INCLUDE_DIR})
         set(ESMF_LIBRARIES ${ESMF_LIBRARY})
+
+        # Add NUOPC if found
+        if(NUOPC_LIBRARY)
+          set(NUOPC_FOUND TRUE)
+          set(NUOPC_LIBRARIES ${NUOPC_LIBRARY})
+          list(APPEND ESMF_LIBRARIES ${NUOPC_LIBRARY})
+          message(STATUS "Found NUOPC: ${NUOPC_LIBRARY}")
+        endif()
       endif()
     endif()
   endif()
@@ -133,6 +163,15 @@ if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
       set(ESMF_INCLUDE_DIRS ${PC_ESMF_INCLUDE_DIRS})
       set(ESMF_LIBRARIES ${PC_ESMF_LIBRARIES})
       set(ESMF_VERSION ${PC_ESMF_VERSION})
+
+      # Look for NUOPC using pkg-config
+      pkg_check_modules(PC_NUOPC QUIET nuopc)
+      if(PC_NUOPC_FOUND)
+        set(NUOPC_FOUND TRUE)
+        set(NUOPC_LIBRARIES ${PC_NUOPC_LIBRARIES})
+        list(APPEND ESMF_LIBRARIES ${PC_NUOPC_LIBRARIES})
+        message(STATUS "Found NUOPC via pkg-config")
+      endif()
     endif()
   endif()
 endif()
@@ -148,11 +187,48 @@ if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
                NAMES esmf
                PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/lib /opt/lib64)
 
+  # # Look for NUOPC library in system paths
+  # find_library(NUOPC_LIBRARY
+  #              NAMES nuopc
+  #              PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/lib /opt/lib64)
+
   if(ESMF_INCLUDE_DIR AND ESMF_LIBRARY)
     set(ESMF_INCLUDE_DIRS ${ESMF_INCLUDE_DIR})
     set(ESMF_LIBRARIES ${ESMF_LIBRARY})
+
+    # # Add NUOPC if found
+    # if(NUOPC_LIBRARY)
+    #   set(NUOPC_FOUND TRUE)
+    #   set(NUOPC_LIBRARIES ${NUOPC_LIBRARY})
+    #   list(APPEND ESMF_LIBRARIES ${NUOPC_LIBRARY})
+    #   message(STATUS "Found NUOPC: ${NUOPC_LIBRARY}")
+    # endif()
   endif()
 endif()
+
+# If NUOPC wasn't found but we have ESMF, try to locate it by inserting -lnuopc
+# if(NOT NUOPC_FOUND AND ESMF_FOUND)
+#   foreach(lib_path ${ESMF_LIBRARIES})
+#     if(lib_path MATCHES "^-L(.*)")
+#       string(REGEX REPLACE "^-L(.*)" "\\1" path "${lib_path}")
+#       if(EXISTS "${path}/libnuopc.so" OR EXISTS "${path}/libnuopc.a")
+#         set(NUOPC_FOUND TRUE)
+#         set(NUOPC_LIBRARIES "-lnuopc")
+#         list(APPEND ESMF_LIBRARIES "-lnuopc")
+#         message(STATUS "Found NUOPC library in ESMF path: ${path}")
+#         break()
+#       endif()
+#     endif()
+#   endforeach()
+
+#   # If we still didn't find NUOPC, just add -lnuopc and hope it works
+#   if(NOT NUOPC_FOUND)
+#     set(NUOPC_FOUND TRUE)
+#     set(NUOPC_LIBRARIES "-lnuopc")
+#     list(APPEND ESMF_LIBRARIES "-lnuopc")
+#     message(STATUS "Adding NUOPC library to link line (assuming it exists with ESMF)")
+#   endif()
+# endif()
 
 # Handle the QUIETLY and REQUIRED arguments and set ESMF_FOUND
 include(FindPackageHandleStandardArgs)
@@ -174,8 +250,27 @@ if(ESMF_FOUND)
     add_library(ESMF ALIAS ESMF::ESMF)
   endif()
 
+  # Create NUOPC target if found
+  if(NUOPC_FOUND AND NOT TARGET ESMF::NUOPC)
+    add_library(ESMF::NUOPC INTERFACE IMPORTED)
+    set_target_properties(ESMF::NUOPC PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${ESMF_INCLUDE_DIRS}"
+      INTERFACE_LINK_LIBRARIES "${NUOPC_LIBRARIES}")
+
+    # Alias the target
+    if(NOT TARGET NUOPC)
+      add_library(NUOPC ALIAS ESMF::NUOPC)
+    endif()
+  endif()
+
   message(STATUS "Found ESMF: ${ESMF_LIBRARIES}")
   if(ESMF_VERSION)
     message(STATUS "ESMF version: ${ESMF_VERSION}")
+  endif()
+
+  if(NUOPC_FOUND)
+    message(STATUS "Found NUOPC: ${NUOPC_LIBRARIES}")
+  else()
+    message(WARNING "NUOPC library not found. This may cause linking errors for NUOPC interfaces.")
   endif()
 endif()
