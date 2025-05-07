@@ -17,6 +17,7 @@ add_library(NcdfUtilHco STATIC EXCLUDE_FROM_ALL
 target_link_libraries(NcdfUtilHco
 	PUBLIC JulDayHco HeadersHco
 )
+# Fix include directories to use generator expressions
 target_include_directories(NcdfUtilHco
-	INTERFACE ${HEMCO_BINARY_DIR}/mod
+	INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )

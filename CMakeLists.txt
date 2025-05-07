@@ -189,14 +189,12 @@ else()
     )
 endif()
 
-
-
 #-----------------------------------------------------------------------------
 # Put all of HEMCO's mod files in build subdir called mod
 #-----------------------------------------------------------------------------
 set(CMAKE_Fortran_MODULE_DIRECTORY ${HEMCO_BINARY_DIR}/mod)
 target_include_directories(HEMCOBuildProperties
-    INTERFACE ${HEMCO_BINARY_DIR}/mod
+    INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )
 
 #-----------------------------------------------------------------------------

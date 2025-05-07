@@ -17,9 +17,9 @@ target_link_libraries(HCOI_ESMF_NUOPC
     PUBLIC ${ESMF_LIBRARIES}
 )
 
-# Add include directories
+# Add include directories - using generator expressions to avoid build directory paths
 target_include_directories(HCOI_ESMF_NUOPC
-    PUBLIC ${HEMCO_BINARY_DIR}/mod
+    PUBLIC $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
     PUBLIC ${ESMF_INCLUDE_DIRS}
 )
 

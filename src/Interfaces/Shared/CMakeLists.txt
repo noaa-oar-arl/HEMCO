@@ -8,8 +8,9 @@ target_link_libraries(HCOI_Shared
 	PUBLIC HCOX
 )
 
+# Use generator expressions to avoid build directory paths
 target_include_directories(HCOI_Shared
-	INTERFACE ${HEMCO_BINARY_DIR}/mod
+	INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )
 
 # Add ESMF include directories when NUOPC interface is enabled

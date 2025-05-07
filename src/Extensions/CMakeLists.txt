@@ -32,9 +32,9 @@ target_link_libraries(HCOX
 	PUBLIC HCO
 )
 
-# Add include directories
+# Add include directories - using generator expressions to avoid build directory paths
 target_include_directories(HCOX
-	INTERFACE ${HEMCO_BINARY_DIR}/mod
+	INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )
 
 # Add ESMF include directories when building with ESMF

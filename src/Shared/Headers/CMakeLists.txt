@@ -1,4 +1,3 @@
-
 add_library(HeadersHco STATIC EXCLUDE_FROM_ALL
 	hco_charpak_mod.F90
 	hco_inquireMod.F90
@@ -7,6 +6,7 @@ add_library(HeadersHco STATIC EXCLUDE_FROM_ALL
 target_link_libraries(HeadersHco
 	PUBLIC HEMCOBuildProperties
 )
+# Fix include directories to use generator expressions
 target_include_directories(HeadersHco
-	INTERFACE ${HEMCO_BINARY_DIR}/mod
+	INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )

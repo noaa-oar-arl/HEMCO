@@ -67,8 +67,9 @@ target_compile_options(HCO
 		""
 		$<$<STREQUAL:"${CMAKE_Fortran_COMPILER_ID}","GNU">:-ffree-line-length-none>
 )
+# Fix include directories to use generator expressions
 target_include_directories(HCO
-	INTERFACE ${HEMCO_BINARY_DIR}/mod
+	INTERFACE $<BUILD_INTERFACE:${HEMCO_BINARY_DIR}/mod>
 )
 
 # Add ESMF I/O code conditionally when using ESMF/NUOPC
