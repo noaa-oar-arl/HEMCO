@@ -1,5 +1,5 @@
 #------------------------------------------------------------------------------
-#                  HEMCO CONFIGURATION FILE: NUOPC Interface                  
+#                  HEMCO CONFIGURATION FILE: NUOPC Interface
 #------------------------------------------------------------------------------
 #
 # This configuration file demonstrates how to set up HEMCO to use fields from
@@ -15,7 +15,7 @@
 #
 
 ###############################################################################
-### SIMULATION SETTINGS ####################################################### 
+### SIMULATION SETTINGS #######################################################
 ###############################################################################
 
 ROOT:                        ./HEMCO_data
@@ -26,7 +26,7 @@ Wildcard:                    *
 Negative values:             0
 
 ###############################################################################
-### ENABLED EMISSIONS ####################################################### 
+### ENABLED EMISSIONS #######################################################
 ###############################################################################
 
 # ExtNr ExtName                  on/off  Species
@@ -47,7 +47,7 @@ Negative values:             0
     # ... other species as needed
 
 ###############################################################################
-### HEMCO BASE EMISSIONS ####################################################### 
+### HEMCO BASE EMISSIONS #######################################################
 ###############################################################################
 
 # ExtNr Name sourceFile sourceVar sourceTime C/R/E SclID Cat Hier
@@ -63,7 +63,7 @@ Negative values:             0
 0 NOx_NUOPC NOX_EMISSIONS NOX_EMISSIONS 2016/1/1/0 C xy 1 1
 
 # --- Black Carbon ---
-# 
+#
 # This field is imported from NUOPC/ESMF
 0 BC_NUOPC BC_EMISSIONS BC_EMISSIONS 2016/1/1/0 C xy 1 1
 
@@ -75,11 +75,11 @@ Negative values:             0
 
 # --- Methane ---
 #
-# This field is imported from NUOPC/ESMF  
+# This field is imported from NUOPC/ESMF
 0 CH4_NUOPC CH4_EMISSIONS CH4_EMISSIONS 2016/1/1/0 C xy 1 1
 
 ###############################################################################
-### EMISSIONS SCALING FACTORS ################################################## 
+### EMISSIONS SCALING FACTORS ##################################################
 ###############################################################################
 
 # ScalID Name sourceFile sourceVar sourceTime C/R/E CIM dim unit
@@ -88,13 +88,13 @@ Negative values:             0
 1 SCALE_ONE ALL/NONE ones 1985/1/1/0 C xy 1
 
 ###############################################################################
-### MASKS ##################################################################### 
+### MASKS #####################################################################
 ###############################################################################
 
 # Not used in this example
 
 ###############################################################################
-### REGIONS ################################################################### 
+### REGIONS ###################################################################
 ###############################################################################
 
 # Not used in this example
@@ -117,29 +117,48 @@ Negative values:             0
 # Name: DIMS
 # DOY, DVT, SPR, STM, CVS, CAT, FIL, SRCFILE, SRCVAR, ESMF, ncRead
 
+# Regridding method configuration for ESMF/NUOPC interface
+REGRID_CONFIG::
+# Default regridding method for ESMF field exchanges
+# Options: CONSERVE, BILINEAR, PATCH, NEAREST_STOD, NEAREST_DTOS
+REGRID_METHOD:              CONSERVE
+# Unmapped action for regridding
+# Options: ERROR, IGNORE, FRAC
+UNMAPPED_ACTION:            IGNORE
+# Pole method for regridding
+# Options: NONE, ALLAVG, NPNTAVG, TEETH
+POLE_METHOD:                ALLAVG
+# Line type for conservative regridding
+# Options: CART, GREAT_CIRCLE
+LINE_TYPE:                  GREAT_CIRCLE
+# Normalization type for conservative regridding
+# Options: DSTAREA, FRACAREA
+NORM_TYPE:                  DSTAREA
+::
+
 # --- NUOPC Import fields ---
 # For NUOPC imports, set SRCFILE to field name in the import state
 # and set ncRead to True
 
-# CO
-CO_EMISSIONS: xy time 
-2016/1/1/0 2016/12/31/23 C/1/1 conc * CO 4/5 CO_EMISSIONS CO_EMISSIONS 1 1
+# CO - Conservative regridding for emissions
+CO_EMISSIONS: xy time
+2016/1/1/0 2016/12/31/23 C/1/1 conc * CO 4/5 CO_EMISSIONS CO_EMISSIONS 1 1 CONSERVE
 
-# NOx 
-NOX_EMISSIONS: xy time 
-2016/1/1/0 2016/12/31/23 C/1/1 conc * NOx 4/5 NOX_EMISSIONS NOX_EMISSIONS 1 1
+# NOx - Conservative regridding for emissions
+NOX_EMISSIONS: xy time
+2016/1/1/0 2016/12/31/23 C/1/1 conc * NOx 4/5 NOX_EMISSIONS NOX_EMISSIONS 1 1 CONSERVE
 
-# BC
-BC_EMISSIONS: xy time 
-2016/1/1/0 2016/12/31/23 C/1/1 conc * BC 4/5 BC_EMISSIONS BC_EMISSIONS 1 1
+# BC - Conservative regridding for emissions
+BC_EMISSIONS: xy time
+2016/1/1/0 2016/12/31/23 C/1/1 conc * BC 4/5 BC_EMISSIONS BC_EMISSIONS 1 1 CONSERVE
 
-# NH3
-NH3_EMISSIONS: xy time 
-2016/1/1/0 2016/12/31/23 C/1/1 conc * NH3 4/5 NH3_EMISSIONS NH3_EMISSIONS 1 1
+# NH3 - Conservative regridding for emissions
+NH3_EMISSIONS: xy time
+2016/1/1/0 2016/12/31/23 C/1/1 conc * NH3 4/5 NH3_EMISSIONS NH3_EMISSIONS 1 1 CONSERVE
 
-# CH4
-CH4_EMISSIONS: xy time 
-2016/1/1/0 2016/12/31/23 C/1/1 conc * CH4 4/5 CH4_EMISSIONS CH4_EMISSIONS 1 1
+# CH4 - Conservative regridding for emissions
+CH4_EMISSIONS: xy time
+2016/1/1/0 2016/12/31/23 C/1/1 conc * CH4 4/5 CH4_EMISSIONS CH4_EMISSIONS 1 1 CONSERVE
 
 # Constant ones field for scaling
 ones: xy

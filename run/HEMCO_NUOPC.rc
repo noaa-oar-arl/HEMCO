@@ -11,12 +11,12 @@ HEMCO_SPECIES     HEMCO.species.rc   # HEMCO species definition file
 ::
 
 HEMCO_IMPORTS::
-# Format: field_name long_name units dimension vertical_location
+# Format: field_name long_name units dimension vertical_location [regrid_method] [weight_file]
 # Surface and 2D fields
 AREA        "grid_cell_area"                    "m2"       2  NONE
-PS          "surface_pressure"                  "Pa"       2  NONE
-U10M        "10-meter_eastward_wind"            "m/s"      2  NONE
-V10M        "10-meter_northward_wind"           "m/s"      2  NONE
+PS          "surface_pressure"                  "Pa"       2  NONE     CONSERVE
+U10M        "10-meter_eastward_wind"            "m/s"      2  NONE     BILINEAR
+V10M        "10-meter_northward_wind"           "m/s"      2  NONE     BILINEAR
 T2M         "2-meter_air_temperature"           "K"        2  NONE
 TS          "surface_skin_temperature"          "K"        2  NONE
 FRLAND      "fraction_of_land"                  "1"        2  NONE
@@ -63,4 +63,21 @@ HEMCO_BC    "HEMCO_black_carbon_emissions"         "kg/m2/s"  2
 HEMCO_NH3   "HEMCO_ammonia_emissions"              "kg/m2/s"  2
 HEMCO_CH4   "HEMCO_methane_emissions"              "kg/m2/s"  2
 HEMCO_VOC   "HEMCO_volatile_organic_compound_emissions" "kg/m2/s"  2
+::
+
+# ESMF Regridding configuration options
+REGRID_OPTIONS::
+# Default regridding method for ESMF coupling
+DEFAULT_REGRID_METHOD:        CONSERVE
+# Alternative methods: BILINEAR, PATCH, NEAREST_STOD, NEAREST_DTOS
+# Unmapped action
+UNMAPPED_ACTION:              IGNORE
+# Pole method for spherical grids
+POLE_METHOD:                  ALLAVG
+# Line type for conservative regridding
+LINE_TYPE:                    GREAT_CIRCLE
+# Normalization type
+NORM_TYPE:                    DSTAREA
+# Enable regrid validation
+VALIDATE_REGRID:              false
 ::
