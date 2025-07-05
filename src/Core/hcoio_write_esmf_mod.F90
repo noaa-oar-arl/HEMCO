@@ -31,11 +31,13 @@ MODULE HCOIO_Write_Mod
   PUBLIC :: HCOIO_WriteOut
   PUBLIC :: HCOIO_WriteOutAsDiag
   PUBLIC :: HCOIO_GetDiagName
+  PUBLIC :: HCOIO_WriteFieldESMF
 !
 ! !PRIVATE MEMBER FUNCTIONS:
 !
   PRIVATE :: ConstructTimeStamp
   PRIVATE :: WriteToFile
+  PRIVATE :: CreateESMFFieldFromData
 !
 ! !DEFINED PARAMETERS:
 !
@@ -366,13 +368,22 @@ CONTAINS
     IF ( FOUND_CONT ) THEN
        IF ( Diagn%SpaceDim == 2 ) THEN
           Arr2D => Diagn%Arr2D%Val
+          ! Use ESMF field writing for CF-compliant output
+          CALL HCOIO_WriteFieldESMF(HcoState, cName, OutFile, &
+                                   Arr2D, NULL(), &
+                                   VarUnit='unknown', &
+                                   VarLongName=cName, RC=RC)
        ELSE
           Arr3D => Diagn%Arr3D%Val
+          ! Use ESMF field writing for CF-compliant output
+          CALL HCOIO_WriteFieldESMF(HcoState, cName, OutFile, &
+                                   NULL(), Arr3D, &
+                                   VarUnit='unknown', &
+                                   VarLongName=cName, RC=RC)
        ENDIF
 
-       CALL WriteToFile(HcoState, cName, OutFile, Arr2D, Arr3D, 0, RC)
        IF ( RC /= HCO_SUCCESS ) THEN
-           CALL HCO_ERROR ( 'Error writing to file', RC, THISLOC=LOC )
+           CALL HCO_ERROR ( 'Error writing to file using ESMF', RC, THISLOC=LOC )
            RETURN
        ENDIF
 
@@ -448,10 +459,13 @@ CONTAINS
     ! Construct output filename
     WRITE(OutFile, '(a,i5.5,a)') 'HEMCO_Diagn.', COUNT, '.nc'
 
-    ! Write to file
-    CALL WriteToFile(HcoState, 'HEMCO_Diagn', OutFile, NULL(), Arr, COUNT, RC)
+    ! Write to file using ESMF field writing for CF-compliant output
+    CALL HCOIO_WriteFieldESMF(HcoState, 'HEMCO_Diagn', OutFile, &
+                             NULL(), Arr, &
+                             VarUnit='unknown', &
+                             VarLongName='HEMCO Diagnostics', RC=RC)
     IF ( RC /= HCO_SUCCESS ) THEN
-        CALL HCO_ERROR ( 'Error writing to diagnostics file', RC, THISLOC=LOC )
+        CALL HCO_ERROR ( 'Error writing to diagnostics file using ESMF', RC, THISLOC=LOC )
         RETURN
     ENDIF
 
@@ -987,7 +1001,7 @@ CONTAINS
         ! This needs to be done manually since the NC_Var_Def interface doesn't support it
         ! CALL NcDef_Var_Attributes(fId, TRIM(DiagnName), "coordinates", "lon lat")
     ELSE
-        CALL NC_Var_Def(fId          = fId,                         &
+        CALL NC_Var_DEF(fId          = fId,                         &
                        lonId        = lonId,                        &
                        latId        = latId,                        &
                        levId        = levIdTmp,                     &
@@ -1065,6 +1079,381 @@ CONTAINS
     status = nf_put_att_text(ncid, varid, attr_name, LEN_TRIM(attr_value), attr_value)
     IF (status /= NF_NOERR) CALL handle_err(status)
   END SUBROUTINE NcDef_Var_Attributes
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: HCOIO_WriteFieldESMF
+!
+! !DESCRIPTION: Subroutine HCOIO\_WriteFieldESMF writes HEMCO diagnostic data
+!  to NetCDF files using ESMF_FieldWrite, which automatically provides
+!  CF-compliant output with proper coordinate variables and metadata.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE HCOIO_WriteFieldESMF( HcoState, FieldName, FileName, &
+                                   Arr2D, Arr3D, VarUnit, VarLongName, RC )
+!
+! !USES:
+!
+    USE ESMF
+    USE HCO_FileData_Mod, ONLY : FileData_CreateESMFGrid
+!
+! !INPUT PARAMETERS:
+!
+    TYPE(HCO_State),  POINTER        :: HcoState     ! HEMCO state object
+    CHARACTER(LEN=*), INTENT(IN)     :: FieldName    ! Field name
+    CHARACTER(LEN=*), INTENT(IN)     :: FileName     ! Output filename
+    REAL(sp),         POINTER        :: Arr2D(:,:)   ! 2D data (optional)
+    REAL(sp),         POINTER        :: Arr3D(:,:,:) ! 3D data (optional)
+    CHARACTER(LEN=*), INTENT(IN), OPTIONAL :: VarUnit      ! Variable units
+    CHARACTER(LEN=*), INTENT(IN), OPTIONAL :: VarLongName  ! Variable long name
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(INOUT)  :: RC           ! Return code
+!
+! !REVISION HISTORY:
+!  01 Jul 2025 - Initial version using ESMF_FieldWrite
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    TYPE(ESMF_Grid)              :: Grid
+    TYPE(ESMF_Field)             :: Field
+    REAL(ESMF_KIND_R8), POINTER  :: FieldPtr2D(:,:)
+    REAL(ESMF_KIND_R8), POINTER  :: FieldPtr3D(:,:,:)
+    REAL(ESMF_KIND_R8), ALLOCATABLE :: lonCenters(:), latCenters(:)
+    CHARACTER(LEN=255)           :: MSG, LOC
+    CHARACTER(LEN=255)           :: Units, LongName
+    INTEGER                      :: nLon, nLat, nLev
+    INTEGER                      :: I, J, K
+    LOGICAL                      :: Is3D
+
+    !=================================================================
+    ! HCOIO_WriteFieldESMF begins here!
+    !=================================================================
+
+    LOC = 'HCOIO_WriteFieldESMF (hcoio_write_esmf_mod.F90)'
+    RC = HCO_SUCCESS
+
+    ! Check input data
+    IF (.NOT. ASSOCIATED(Arr2D) .AND. .NOT. ASSOCIATED(Arr3D)) THEN
+        MSG = 'Both Arr2D and Arr3D are NULL - nothing to write'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    Is3D = ASSOCIATED(Arr3D)
+
+    ! Get grid dimensions
+    nLon = HcoState%NX
+    nLat = HcoState%NY
+    IF (Is3D) THEN
+        nLev = HcoState%NZ
+    ELSE
+        nLev = 1
+    ENDIF
+
+    ! Set default metadata
+    IF (PRESENT(VarUnit)) THEN
+        Units = TRIM(VarUnit)
+    ELSE
+        Units = 'unknown'
+    ENDIF
+
+    IF (PRESENT(VarLongName)) THEN
+        LongName = TRIM(VarLongName)
+    ELSE
+        LongName = TRIM(FieldName)
+    ENDIF
+
+    ! Create coordinate arrays for ESMF grid
+    ALLOCATE(lonCenters(nLon), latCenters(nLat))
+
+    ! Extract coordinate centers from HEMCO grid
+    DO I = 1, nLon
+        lonCenters(I) = HcoState%Grid%XMID%Val(I,1)
+    ENDDO
+    DO J = 1, nLat
+        latCenters(J) = HcoState%Grid%YMID%Val(1,J)
+    ENDDO
+
+    ! Create ESMF grid
+    IF (Is3D) THEN
+        Grid = ESMF_GridCreateNoPeriDim( &
+            maxIndex=(/nLon, nLat, nLev/), &
+            coordSys=ESMF_COORDSYS_SPH_DEG, &
+            indexflag=ESMF_INDEX_GLOBAL, &
+            rc=RC)
+    ELSE
+        Grid = ESMF_GridCreateNoPeriDim( &
+            maxIndex=(/nLon, nLat/), &
+            coordSys=ESMF_COORDSYS_SPH_DEG, &
+            indexflag=ESMF_INDEX_GLOBAL, &
+            rc=RC)
+    ENDIF
+
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        DEALLOCATE(lonCenters, latCenters)
+        RETURN
+    ENDIF
+
+    ! Add coordinates to grid
+    CALL ESMF_GridAddCoord(Grid, staggerloc=ESMF_STAGGERLOC_CENTER, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to add coordinates to grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        CALL ESMF_GridDestroy(Grid, rc=RC)
+        DEALLOCATE(lonCenters, latCenters)
+        RETURN
+    ENDIF
+
+    ! Create ESMF field
+    Field = ESMF_FieldCreate(Grid, ESMF_TYPEKIND_R8, &
+                            staggerloc=ESMF_STAGGERLOC_CENTER, &
+                            name=TRIM(FieldName), rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF field'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        CALL ESMF_GridDestroy(Grid, rc=RC)
+        DEALLOCATE(lonCenters, latCenters)
+        RETURN
+    ENDIF
+
+    ! Set field attributes
+    CALL ESMF_AttributeSet(Field, 'units', TRIM(Units), rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to set units attribute'
+        CALL HCO_WARNING(MSG, THISLOC=LOC)
+    ENDIF
+
+    CALL ESMF_AttributeSet(Field, 'long_name', TRIM(LongName), rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to set long_name attribute'
+        CALL HCO_WARNING(MSG, THISLOC=LOC)
+    ENDIF
+
+    ! Get pointer to field data and copy HEMCO data
+    IF (Is3D) THEN
+        CALL ESMF_FieldGet(Field, farrayPtr=FieldPtr3D, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get 3D field pointer'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            CALL ESMF_FieldDestroy(Field, rc=RC)
+            CALL ESMF_GridDestroy(Grid, rc=RC)
+            DEALLOCATE(lonCenters, latCenters)
+            RETURN
+        ENDIF
+
+        ! Copy data
+        DO K = 1, SIZE(Arr3D,3)
+            DO J = 1, SIZE(Arr3D,2)
+                DO I = 1, SIZE(Arr3D,1)
+                    FieldPtr3D(I,J,K) = REAL(Arr3D(I,J,K), ESMF_KIND_R8)
+                ENDDO
+            ENDDO
+        ENDDO
+    ELSE
+        CALL ESMF_FieldGet(Field, farrayPtr=FieldPtr2D, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get 2D field pointer'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            CALL ESMF_FieldDestroy(Field, rc=RC)
+            CALL ESMF_GridDestroy(Grid, rc=RC)
+            DEALLOCATE(lonCenters, latCenters)
+            RETURN
+        ENDIF
+
+        ! Copy data
+        DO J = 1, SIZE(Arr2D,2)
+            DO I = 1, SIZE(Arr2D,1)
+                FieldPtr2D(I,J) = REAL(Arr2D(I,J), ESMF_KIND_R8)
+            ENDDO
+        ENDDO
+    ENDIF
+
+    ! Write field to NetCDF file using ESMF
+    ! This automatically creates CF-compliant output
+    CALL ESMF_FieldWrite(Field, TRIM(FileName), rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to write field to file: ' // TRIM(FileName)
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        CALL ESMF_FieldDestroy(Field, rc=RC)
+        CALL ESMF_GridDestroy(Grid, rc=RC)
+        DEALLOCATE(lonCenters, latCenters)
+        RETURN
+    ENDIF
+
+    ! Verbose output
+    IF (HcoState%Config%doVerbose) THEN
+        MSG = 'Successfully wrote ESMF field to: ' // TRIM(FileName)
+        CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
+    ENDIF
+
+    ! Cleanup
+    CALL ESMF_FieldDestroy(Field, rc=RC)
+    CALL ESMF_GridDestroy(Grid, rc=RC)
+    DEALLOCATE(lonCenters, latCenters)
+
+    RC = HCO_SUCCESS
+
+  END SUBROUTINE HCOIO_WriteFieldESMF
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: CreateESMFFieldFromData
+!
+! !DESCRIPTION: Helper routine to create an ESMF field from HEMCO data arrays.
+!  This routine handles the grid creation and field initialization.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE CreateESMFFieldFromData( HcoState, FieldName, Arr2D, Arr3D, &
+                                      Field, RC )
+!
+! !USES:
+!
+    USE ESMF
+!
+! !INPUT PARAMETERS:
+!
+    TYPE(HCO_State),  POINTER        :: HcoState     ! HEMCO state object
+    CHARACTER(LEN=*), INTENT(IN)     :: FieldName    ! Field name
+    REAL(sp),         POINTER        :: Arr2D(:,:)   ! 2D data (optional)
+    REAL(sp),         POINTER        :: Arr3D(:,:,:) ! 3D data (optional)
+!
+! !OUTPUT PARAMETERS:
+!
+    TYPE(ESMF_Field), INTENT(OUT)    :: Field        ! ESMF field
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    INTEGER,          INTENT(INOUT)  :: RC           ! Return code
+!
+! !REVISION HISTORY:
+!  01 Jul 2025 - Initial version
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    TYPE(ESMF_Grid)              :: Grid
+    REAL(ESMF_KIND_R8), POINTER  :: FieldPtr2D(:,:)
+    REAL(ESMF_KIND_R8), POINTER  :: FieldPtr3D(:,:,:)
+    CHARACTER(LEN=255)           :: MSG, LOC
+    INTEGER                      :: nLon, nLat, nLev
+    INTEGER                      :: I, J, K
+    LOGICAL                      :: Is3D
+
+    !=================================================================
+    ! CreateESMFFieldFromData begins here!
+    !=================================================================
+
+    LOC = 'CreateESMFFieldFromData (hcoio_write_esmf_mod.F90)'
+    RC = HCO_SUCCESS
+
+    ! Check input data
+    IF (.NOT. ASSOCIATED(Arr2D) .AND. .NOT. ASSOCIATED(Arr3D)) THEN
+        MSG = 'Both Arr2D and Arr3D are NULL'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    Is3D = ASSOCIATED(Arr3D)
+
+    ! Get grid dimensions
+    nLon = HcoState%NX
+    nLat = HcoState%NY
+    IF (Is3D) THEN
+        nLev = HcoState%NZ
+    ENDIF
+
+    ! Create ESMF grid based on HEMCO grid
+    ! For now, create a simple rectilinear grid
+    IF (Is3D) THEN
+        Grid = ESMF_GridCreateNoPeriDim( &
+            maxIndex=(/nLon, nLat, nLev/), &
+            coordSys=ESMF_COORDSYS_SPH_DEG, &
+            indexflag=ESMF_INDEX_GLOBAL, &
+            rc=RC)
+    ELSE
+        Grid = ESMF_GridCreateNoPeriDim( &
+            maxIndex=(/nLon, nLat/), &
+            coordSys=ESMF_COORDSYS_SPH_DEG, &
+            indexflag=ESMF_INDEX_GLOBAL, &
+            rc=RC)
+    ENDIF
+
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    ! Create ESMF field
+    Field = ESMF_FieldCreate(Grid, ESMF_TYPEKIND_R8, &
+                            staggerloc=ESMF_STAGGERLOC_CENTER, &
+                            name=TRIM(FieldName), rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF field'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        CALL ESMF_GridDestroy(Grid, rc=RC)
+        RETURN
+    ENDIF
+
+    ! Get pointer to field data and copy HEMCO data
+    IF (Is3D) THEN
+        CALL ESMF_FieldGet(Field, farrayPtr=FieldPtr3D, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get 3D field pointer'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            CALL ESMF_FieldDestroy(Field, rc=RC)
+            CALL ESMF_GridDestroy(Grid, rc=RC)
+            RETURN
+        ENDIF
+
+        ! Copy data
+        DO K = 1, SIZE(Arr3D,3)
+            DO J = 1, SIZE(Arr3D,2)
+                DO I = 1, SIZE(Arr3D,1)
+                    FieldPtr3D(I,J,K) = REAL(Arr3D(I,J,K), ESMF_KIND_R8)
+                ENDDO
+            ENDDO
+        ENDDO
+    ELSE
+        CALL ESMF_FieldGet(Field, farrayPtr=FieldPtr2D, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get 2D field pointer'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            CALL ESMF_FieldDestroy(Field, rc=RC)
+            CALL ESMF_GridDestroy(Grid, rc=RC)
+            RETURN
+        ENDIF
+
+        ! Copy data
+        DO J = 1, SIZE(Arr2D,2)
+            DO I = 1, SIZE(Arr2D,1)
+                FieldPtr2D(I,J) = REAL(Arr2D(I,J), ESMF_KIND_R8)
+            ENDDO
+        ENDDO
+    ENDIF
+
+    RC = HCO_SUCCESS
+
+  END SUBROUTINE CreateESMFFieldFromData
 !EOC
 !------------------------------------------------------------------------------
 !                   Harmonized Emissions Component (HEMCO)                    !

@@ -654,6 +654,13 @@ CONTAINS
     CHARACTER(LEN=255)        :: ItemPrefix
     CHARACTER(LEN=512)        :: msg
 
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+    ! ESMF regridding variables
+    CHARACTER(LEN= 31)        :: regridMethod
+    CHARACTER(LEN=255)        :: weightFile
+    CHARACTER(LEN= 63)        :: regridOpts
+#endif
+
     ! Arrays
     INTEGER                   :: SplitInts(255)
     CHARACTER(LEN=255)        :: SubStrs(255)
@@ -698,6 +705,13 @@ CONTAINS
        int2    = 0
        int3    = 0
 
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+       ! Initialize ESMF regridding variables
+       regridMethod = ''
+       weightFile   = ''
+       regridOpts   = ''
+#endif
+
        !==============================================================
        ! Read line and get desired character strings
        ! Since base emissions, scale factors and masks have different
@@ -710,10 +724,9 @@ CONTAINS
                                    srcTime,   5,      TmCycle,  6,  &
                                    srcDim,    7,      srcUnit,  8,  &
                                    SpcName,   9,      Char1,   10,  &
-                                   Char2,    11,                    &
-                                   Int1,     -1,      Int2,    12,  &
-                                   Int3,      1,      STAT,         &
-                                   OutLine=LINE                      )
+                                   Char2,    11,      Int1,    -1,  &
+                                   Int2,     12,      Int3,     1,  &
+                                   STAT,               OutLine=LINE   )
 
        ELSEIF ( DctType == HCO_DCTTYPE_SCAL ) THEN
           CALL ReadAndSplit_Line ( HcoConfig, IU_HCO, cName,    2,  &
@@ -721,10 +734,9 @@ CONTAINS
                                    srcTime,   5,      TmCycle,  6,  &
                                    srcDim,    7,      srcUnit,  8,  &
                                    SpcName,  -1,      Char1,   -1,  &
-                                   Char2,    -1,                    &
-                                   Int1,      1,      Int2,     9,  &
-                                   Int3,     10,      STAT,         &
-                                   optcl=10    ,      OutLine=LINE   )
+                                   Char2,    -1,      Int1,     1,  &
+                                   Int2,      9,      Int3,    10,  &
+                                   STAT,               OutLine=LINE   )
 
        ELSEIF ( DctType == HCO_DCTTYPE_MASK ) THEN
           CALL ReadAndSplit_Line ( HcoConfig, IU_HCO, cName,    2,  &
@@ -732,10 +744,10 @@ CONTAINS
                                    srcTime,   5,      TmCycle,  6,  &
                                    srcDim,    7,      srcUnit,  8,  &
                                    SpcName,  -1,      Char1,   10,  &
-                                   Char2,    11,                    &
-                                   Int1,      1,      Int2,     9,  &
-                                   Int3,     -1,      STAT,         &
-                                   optcl=11,          OutLine=LINE   )
+                                   Char2,    11,      Int1,     1,  &
+                                   Int2,      9,      Int3,    -1,  &
+                                   STAT,               OutLine=LINE   )
+
        ENDIF
 
        !--------------------------------------------------------------
@@ -1042,6 +1054,13 @@ CONTAINS
                    RETURN
                 ENDIF
 
+                ! Store ESMF regridding options in FileData structure
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+                Dta%RegridMethod = TRIM(regridMethod)
+                Dta%WeightFile   = TRIM(weightFile)
+                Dta%RegridOpts   = TRIM(regridOpts)
+#endif
+
              ENDIF
 
              ! Connect this FileData object to the HcoState%HcoConfigList.
@@ -1261,6 +1280,13 @@ CONTAINS
                 CALL HCO_Error( MSG, RC, thisLoc=loc )
                 RETURN
              ENDIF
+
+             ! Store ESMF regridding options in FileData structure
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+             Dta%RegridMethod = TRIM(regridMethod)
+             Dta%WeightFile   = TRIM(weightFile)
+             Dta%RegridOpts   = TRIM(regridOpts)
+#endif
 
           ENDIF
 
@@ -2254,7 +2280,7 @@ CONTAINS
        ! Also set verbose in HcoConfig
        IF ( isVerbose .AND. ( HcoConfig%amIRoot .OR. .NOT. isVerboseOnRoot ) )   &
             HcoConfig%doVerbose = .TRUE.
-       
+
     ENDIF
 
     ! Leave w/ success

@@ -108,6 +108,10 @@ MODULE HCO_FileData_Mod
   PUBLIC  :: FileData_ArrIsDefined
   PUBLIC  :: FileData_ArrIsTouched
   PUBLIC  :: FileData_ArrInit
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+  PUBLIC  :: FileData_CreateESMFGrid
+  PUBLIC  :: FileData_CreateESMFCurvilinearGrid
+#endif
 !
 ! !PRIVATE MEMBER FUNCTIONS:
 !
@@ -205,6 +209,16 @@ CONTAINS
     FileDta%DoShare      = .FALSE.
     FileDta%IsInList     = .FALSE.
     FileDta%IsTouched    = .FALSE.
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+    ! Initialize ESMF regridding fields
+    FileDta%RegridMethod = ''
+    FileDta%WeightFile   = ''
+    FileDta%RegridOpts   = ''
+    ! Initialize ESMF objects
+    FileDta%SrcGrid      => NULL()
+    FileDta%HasRegridCache = .FALSE.
+    ! Note: RouteHandle is initialized by ESMF_Initialize call (automatic)
+#endif
 
   END SUBROUTINE FileData_Init
 !EOC
@@ -248,7 +262,21 @@ CONTAINS
        CALL HCO_ArrCleanup( FileDta%V3, DeepClean )
        CALL HCO_ArrCleanup( FileDta%V2, DeepClean )
        FileDta%nt = 0
-       
+
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+       ! Clean up ESMF regridding objects
+       IF ( DeepClean ) THEN
+          IF ( ASSOCIATED(FileDta%SrcGrid) ) THEN
+             CALL ESMF_GridDestroy(FileDta%SrcGrid, rc=I)
+             FileDta%SrcGrid => NULL()
+          ENDIF
+          IF ( FileDta%HasRegridCache ) THEN
+             CALL ESMF_RouteHandleDestroy(FileDta%RouteHandle, rc=I)
+             FileDta%HasRegridCache = .FALSE.
+          ENDIF
+       ENDIF
+#endif
+
        IF ( DeepClean ) THEN
           FileDta%tIDx => NULL()
           DEALLOCATE ( FileDta )
@@ -636,4 +664,360 @@ CONTAINS
 
   END SUBROUTINE FileData_ArrInit3D
 !EOC
+
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: FileData_CreateESMFGrid
+!
+! !DESCRIPTION: Create an ESMF grid from provided coordinate arrays and store
+!  it in the FileData structure for regridding operations. This is a utility
+!  function that does not perform any file I/O - coordinate arrays should be
+!  provided by the calling routine (typically from the ESMF read module).
+!  Corner coordinates are optional - if not provided, they will be calculated
+!  from the center coordinates assuming regular spacing.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE FileData_CreateESMFGrid( FileDta, lonCenters, latCenters, &
+                                      lonCorners, latCorners, RC )
+!
+! !USES:
+!
+    USE ESMF
+!
+! !INPUT PARAMETERS:
+!
+    REAL(ESMF_KIND_R8), INTENT(IN)   :: lonCenters(:)  ! Longitude centers
+    REAL(ESMF_KIND_R8), INTENT(IN)   :: latCenters(:)  ! Latitude centers
+    REAL(ESMF_KIND_R8), INTENT(IN), OPTIONAL :: lonCorners(:) ! Longitude corners
+    REAL(ESMF_KIND_R8), INTENT(IN), OPTIONAL :: latCorners(:) ! Latitude corners
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(FileData), POINTER       :: FileDta  ! File data container
+    INTEGER,        INTENT(INOUT) :: RC       ! Return code
+!
+! !REVISION HISTORY:
+!  01 Jul 2025 - Initial version
+!  01 Jul 2025 - Refactored to remove file I/O, takes coordinate arrays as input
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    INTEGER :: nLon, nLat
+    REAL(ESMF_KIND_R8), ALLOCATABLE :: lonCornCalc(:), latCornCalc(:)
+    CHARACTER(LEN=255) :: MSG, LOC
+    INTEGER :: I, J
+    REAL(ESMF_KIND_R8), POINTER :: gridLonPtr(:,:), gridLatPtr(:,:)
+    REAL(ESMF_KIND_R8), POINTER :: gridLonCornPtr(:,:), gridLatCornPtr(:,:)
+    LOGICAL :: useProvidedCorners
+
+    !=================================================================
+    ! FileData_CreateESMFGrid begins here
+    !=================================================================
+    LOC = 'FileData_CreateESMFGrid (hco_filedata_mod.F90)'
+    RC = HCO_SUCCESS
+
+    ! Return if grid already exists
+    IF (ASSOCIATED(FileDta%SrcGrid)) RETURN
+
+    ! Get dimensions
+    nLon = SIZE(lonCenters)
+    nLat = SIZE(latCenters)
+
+    ! Check if corner coordinates are provided
+    useProvidedCorners = PRESENT(lonCorners) .AND. PRESENT(latCorners)
+
+    ! If corners not provided, calculate them
+    IF (.NOT. useProvidedCorners) THEN
+        ALLOCATE(lonCornCalc(nLon+1), latCornCalc(nLat+1))
+
+        ! Calculate corner coordinates (cell boundaries)
+        ! For longitude
+        lonCornCalc(1) = lonCenters(1) - (lonCenters(2) - lonCenters(1)) * 0.5_ESMF_KIND_R8
+        DO I = 2, nLon
+            lonCornCalc(I) = (lonCenters(I-1) + lonCenters(I)) * 0.5_ESMF_KIND_R8
+        ENDDO
+        lonCornCalc(nLon+1) = lonCenters(nLon) + (lonCenters(nLon) - lonCenters(nLon-1)) * 0.5_ESMF_KIND_R8
+
+        ! For latitude
+        latCornCalc(1) = latCenters(1) - (latCenters(2) - latCenters(1)) * 0.5_ESMF_KIND_R8
+        DO I = 2, nLat
+            latCornCalc(I) = (latCenters(I-1) + latCenters(I)) * 0.5_ESMF_KIND_R8
+        ENDDO
+        latCornCalc(nLat+1) = latCenters(nLat) + (latCenters(nLat) - latCenters(nLat-1)) * 0.5_ESMF_KIND_R8
+    ENDIF
+
+    ! Create ESMF grid
+    ALLOCATE(FileDta%SrcGrid)
+    FileDta%SrcGrid = ESMF_GridCreateNoPeriDim( &
+        maxIndex=(/nLon, nLat/), &
+        coordSys=ESMF_COORDSYS_SPH_DEG, &
+        indexflag=ESMF_INDEX_GLOBAL, &
+        rc=RC)
+
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    ! Add center coordinates to the grid
+    CALL ESMF_GridAddCoord(FileDta%SrcGrid, staggerloc=ESMF_STAGGERLOC_CENTER, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to add center coordinates to grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    ! Add corner coordinates to the grid
+    CALL ESMF_GridAddCoord(FileDta%SrcGrid, staggerloc=ESMF_STAGGERLOC_CORNER, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to add corner coordinates to grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    ! Get pointers to grid coordinate arrays and populate them
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=1, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=gridLonPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get longitude center pointer'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=2, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=gridLatPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get latitude center pointer'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    ! Populate center coordinates
+    DO I = 1, nLon
+        DO J = 1, nLat
+            gridLonPtr(I,J) = lonCenters(I)
+            gridLatPtr(I,J) = latCenters(J)
+        ENDDO
+    ENDDO
+
+    ! Get pointers to corner coordinates and populate them
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=1, &
+                          staggerloc=ESMF_STAGGERLOC_CORNER, &
+                          farrayPtr=gridLonCornPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get longitude corner pointer'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=2, &
+                          staggerloc=ESMF_STAGGERLOC_CORNER, &
+                          farrayPtr=gridLatCornPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get latitude corner pointer'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+        RETURN
+    ENDIF
+
+    ! Populate corner coordinates using provided or calculated values
+    DO I = 1, nLon+1
+        DO J = 1, nLat+1
+            IF (useProvidedCorners) THEN
+                gridLonCornPtr(I,J) = lonCorners(I)
+                gridLatCornPtr(I,J) = latCorners(J)
+            ELSE
+                gridLonCornPtr(I,J) = lonCornCalc(I)
+                gridLatCornPtr(I,J) = latCornCalc(J)
+            ENDIF
+        ENDDO
+    ENDDO
+
+    ! Clean up calculated corners if allocated
+    IF (ALLOCATED(lonCornCalc)) DEALLOCATE(lonCornCalc, latCornCalc)
+
+    ! Mark as successful
+    RC = HCO_SUCCESS
+
+  END SUBROUTINE FileData_CreateESMFGrid
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !IROUTINE: FileData_CreateESMFCurvilinearGrid
+!
+! !DESCRIPTION: Create an ESMF curvilinear grid from provided 2D coordinate
+!  arrays and store it in the FileData structure for regridding operations.
+!  This is a utility function for handling curvilinear grids with 2D
+!  coordinate arrays.
+!\\
+!\\
+! !INTERFACE:
+!
+  SUBROUTINE FileData_CreateESMFCurvilinearGrid( FileDta, lonCenters2D, latCenters2D, &
+                                                 lonCorners2D, latCorners2D, RC )
+!
+! !USES:
+!
+    USE ESMF
+!
+! !INPUT PARAMETERS:
+!
+    REAL(ESMF_KIND_R8), INTENT(IN)   :: lonCenters2D(:,:) ! 2D longitude centers
+    REAL(ESMF_KIND_R8), INTENT(IN)   :: latCenters2D(:,:) ! 2D latitude centers
+    REAL(ESMF_KIND_R8), INTENT(IN), OPTIONAL :: lonCorners2D(:,:) ! 2D longitude corners
+    REAL(ESMF_KIND_R8), INTENT(IN), OPTIONAL :: latCorners2D(:,:) ! 2D latitude corners
+!
+! !INPUT/OUTPUT PARAMETERS:
+!
+    TYPE(FileData), POINTER       :: FileDta  ! File data container
+    INTEGER,        INTENT(INOUT) :: RC       ! Return code
+!
+! !REVISION HISTORY:
+!  01 Jul 2025 - Initial version for curvilinear grids
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+    CHARACTER(LEN=255) :: MSG, LOC
+    INTEGER :: nLon, nLat
+    REAL(ESMF_KIND_R8), POINTER :: gridLonPtr(:,:), gridLatPtr(:,:)
+    REAL(ESMF_KIND_R8), POINTER :: cornerLonPtr(:,:), cornerLatPtr(:,:)
+    INTEGER :: I, J
+    LOGICAL :: useProvidedCorners
+
+    !=================================================================
+    ! FileData_CreateESMFCurvilinearGrid begins here
+    !=================================================================
+    LOC = 'FileData_CreateESMFCurvilinearGrid (hco_filedata_mod.F90)'
+    RC = HCO_SUCCESS
+
+    ! Return if grid already exists
+    IF (ASSOCIATED(FileDta%SrcGrid)) RETURN
+
+    ! Get dimensions
+    nLon = SIZE(lonCenters2D, 1)
+    nLat = SIZE(lonCenters2D, 2)
+
+    ! Check if corner coordinates are provided
+    useProvidedCorners = PRESENT(lonCorners2D) .AND. PRESENT(latCorners2D)
+
+    ! Create ESMF curvilinear grid
+    ALLOCATE(FileDta%SrcGrid)
+    FileDta%SrcGrid = ESMF_GridCreateNoPeriDim( &
+        maxIndex=(/nLon, nLat/), &
+        coordSys=ESMF_COORDSYS_SPH_DEG, &
+        coordTypeKind=ESMF_TYPEKIND_R8, &
+        indexflag=ESMF_INDEX_GLOBAL, &
+        rc=RC)
+
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to create ESMF curvilinear grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    ! Add center coordinates to the grid
+    CALL ESMF_GridAddCoord(FileDta%SrcGrid, staggerloc=ESMF_STAGGERLOC_CENTER, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to add center coordinates to curvilinear grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    ! Add corner coordinates if provided
+    IF (useProvidedCorners) THEN
+        CALL ESMF_GridAddCoord(FileDta%SrcGrid, staggerloc=ESMF_STAGGERLOC_CORNER, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to add corner coordinates to curvilinear grid'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            RETURN
+        ENDIF
+    ENDIF
+
+    ! Get pointers to grid coordinate arrays and populate them
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=1, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=gridLonPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get longitude center pointer for curvilinear grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=2, &
+                          staggerloc=ESMF_STAGGERLOC_CENTER, &
+                          farrayPtr=gridLatPtr, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        MSG = 'Failed to get latitude center pointer for curvilinear grid'
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        RETURN
+    ENDIF
+
+    ! Populate center coordinates
+    DO J = 1, nLat
+        DO I = 1, nLon
+            gridLonPtr(I,J) = lonCenters2D(I,J)
+            gridLatPtr(I,J) = latCenters2D(I,J)
+        ENDDO
+    ENDDO
+
+    ! Populate corner coordinates if provided
+    IF (useProvidedCorners) THEN
+        CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=1, &
+                              staggerloc=ESMF_STAGGERLOC_CORNER, &
+                              farrayPtr=cornerLonPtr, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get longitude corner pointer for curvilinear grid'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            RETURN
+        ENDIF
+
+        CALL ESMF_GridGetCoord(FileDta%SrcGrid, coordDim=2, &
+                              staggerloc=ESMF_STAGGERLOC_CORNER, &
+                              farrayPtr=cornerLatPtr, rc=RC)
+        IF (RC /= ESMF_SUCCESS) THEN
+            MSG = 'Failed to get latitude corner pointer for curvilinear grid'
+            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+            RETURN
+        ENDIF
+
+        ! Populate corner coordinates
+        DO J = 1, SIZE(latCorners2D, 2)
+            DO I = 1, SIZE(lonCorners2D, 1)
+                cornerLonPtr(I,J) = lonCorners2D(I,J)
+                cornerLatPtr(I,J) = latCorners2D(I,J)
+            ENDDO
+        ENDDO
+    ENDIF
+
+    ! Mark as successful
+    RC = HCO_SUCCESS
+
+  END SUBROUTINE FileData_CreateESMFCurvilinearGrid
+!EOC
+#endif
+
 END MODULE HCO_FileData_Mod

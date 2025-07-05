@@ -28,6 +28,9 @@ MODULE HCO_TYPES_MOD
 !
   USE HCO_Error_Mod
   USE HCO_Arr_Mod
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+  USE ESMF
+#endif
 
   IMPLICIT NONE
   PUBLIC
@@ -139,6 +142,13 @@ MODULE HCO_TYPES_MOD
      LOGICAL  :: TimeShiftCap   ! Cap time shift to same day. Defaults to no.
      LOGICAL  :: isESMF         ! Are we using ESMF?
      LOGICAL  :: isDryRun       ! Are we in a dry run?
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+     ! ESMF-specific options
+     LOGICAL  :: UseESMFRegrid  ! Use ESMF regridding instead of HEMCO internal regridding
+     CHARACTER(LEN=31) :: DefaultRegridMethod ! Default regridding method (CONSERVE, BILINEAR, etc.)
+     LOGICAL  :: CacheRegridWeights ! Cache regridding weights for efficiency
+     LOGICAL  :: ForceNativeGrid    ! Force use of host model's native ESMF grid
+#endif
   END TYPE HcoOpt
 
   !=========================================================================
@@ -156,12 +166,12 @@ MODULE HCO_TYPES_MOD
   ! can be specified for the extensions through ExtList.
   !
   ! NOTES:
-  ! *  Not used in ESMF environment
+  ! *  Not used in ESMF environment (legacy fields)
   ! ** Only used by some extensions
   !=========================================================================
   TYPE :: HcoGrid
-     TYPE(Arr2D_Hp), POINTER :: XMID       ! mid-points in x-direction (lon)
-     TYPE(Arr2D_Hp), POINTER :: YMID       ! mid-points in y-direction (lat)
+     TYPE(Arr2D_Hp), POINTER :: XMID       ! mid-points in x-direction (lon)*
+     TYPE(Arr2D_Hp), POINTER :: YMID       ! mid-points in y-direction (lat)*
      TYPE(Arr2D_Hp), POINTER :: XEDGE      ! grid edges in x-direction (lon)*
      TYPE(Arr2D_Hp), POINTER :: YEDGE      ! grid edges in y-direction (lat)*
      TYPE(Arr3D_Hp), POINTER :: PEDGE      ! pressure edges (Pa)
@@ -172,6 +182,12 @@ MODULE HCO_TYPES_MOD
      TYPE(Arr2D_Hp), POINTER :: PBLHEIGHT  ! PBL height in m
      TYPE(Arr3D_Hp), POINTER :: BXHEIGHT_M ! grid box heights (m)**
      TYPE(VertGrid), POINTER :: ZGRID      ! vertical grid description
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+     ! ESMF grid for native ESMF/NUOPC support
+     TYPE(ESMF_Grid)         :: ESMFGrid    ! ESMF grid object for curvilinear/structured grids
+     LOGICAL                 :: HasESMFGrid ! Whether ESMFGrid is initialized and valid
+     INTEGER                 :: GridType    ! Grid type: 1=rectilinear, 2=curvilinear, 3=unstructured
+#endif
   END TYPE HcoGrid
 
   !=========================================================================
@@ -372,6 +388,16 @@ MODULE HCO_TYPES_MOD
      LOGICAL                     :: DoShare   ! shared object?
      LOGICAL                     :: IsInList  ! is in emissions list?
      LOGICAL                     :: IsTouched ! Has container been touched yet?
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+     ! ESMF regridding options
+     CHARACTER(LEN=31)           :: RegridMethod ! ESMF regridding method (e.g., CONSERVE, BILINEAR)
+     CHARACTER(LEN=255)          :: WeightFile   ! Path to weight file for regridding
+     CHARACTER(LEN=255)          :: RegridOpts   ! Additional regridding options
+     ! ESMF objects for regridding (cached for efficiency)
+     TYPE(ESMF_Grid), POINTER    :: SrcGrid      ! Source grid from file
+     TYPE(ESMF_RouteHandle)      :: RouteHandle  ! Cached regridding RouteHandle
+     LOGICAL                     :: HasRegridCache ! Whether regrid cache is valid
+#endif
   END TYPE FileData
 
   !-------------------------------------------------------------------------
