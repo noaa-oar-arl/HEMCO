@@ -23,6 +23,7 @@ MODULE HCOI_ESMF_NUOPC_MOD
   USE HCO_STATE_MOD, ONLY : HCO_State
   USE HCOX_STATE_MOD
 
+
   ! Include these for ESMF/NUOPC definitions
   USE ESMF          ! Import full ESMF module without any conditional directives
   USE NUOPC         ! Use the entire NUOPC module
@@ -32,6 +33,7 @@ MODULE HCOI_ESMF_NUOPC_MOD
   USE NUOPC_Model, ONLY: model_routine_SS              => SetServices
   USE NUOPC_Model, ONLY: NUOPC_ModelGet, NUOPC_CompDerive
   USE NUOPC_Model, ONLY: NUOPC_CompAttributeSet, NUOPC_CompAttributeGet
+  USE NUOPC_Model, ONLY: NUOPC_CompSpecialize
 
   IMPLICIT NONE
   PRIVATE
@@ -55,6 +57,12 @@ MODULE HCOI_ESMF_NUOPC_MOD
   PRIVATE :: DataInitialize
   PRIVATE :: ModelAdvance
   PRIVATE :: ModelFinalize
+
+  ! Private ESMF wrapper routines
+  PRIVATE :: InitializeP1_ESMF
+  PRIVATE :: InitializeP2_ESMF
+  PRIVATE :: ModelAdvance_ESMF
+  PRIVATE :: ModelFinalize_ESMF
 !
 ! !REVISION HISTORY:
 !  29 Apr 2025 - Initial version created for pure ESMF/NUOPC interface
@@ -496,38 +504,41 @@ CONTAINS
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    ! Set entry points for Initialize, Run, and Finalize
-    ! Note: Call NUOPC_CompDefEntryPoint with positional arguments, not keywords
-    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
-         InitializeP1, 1, rc)
+    ! Use modern NUOPC_CompSpecialize for NUOPC-specific methods
+    CALL NUOPC_CompSpecialize(gcomp, specLabel=model_label_Advance, &
+         specRoutine=ModelAdvance, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
-         InitializeP2, 2, rc)
+    CALL NUOPC_CompSpecialize(gcomp, specLabel=model_label_SetClock, &
+         specRoutine=SetClock, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    ! Run and finalize are simpler - they don't need multiple phases
-    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_RUN, &
-         ModelAdvance, rc)
+    CALL NUOPC_CompSpecialize(gcomp, specLabel=model_label_DataInitialize, &
+         specRoutine=DataInitialize, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_FINALIZE, &
-         ModelFinalize, rc)
+    ! Register initialize phases using ESMF_GridCompSetEntryPoint
+    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
+         InitializeP1_ESMF, phase=1, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    ! Register the special NUOPC initialization method for clock
-    CALL NUOPC_CompDefEntryPoint(gcomp, model_label_SetClock, &
-         SetClock, rc)
+    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_INITIALIZE, &
+         InitializeP2_ESMF, phase=2, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
-    ! Register a data initialization method to handle import/export variables
-    CALL NUOPC_CompDefEntryPoint(gcomp, model_label_DataInitialize, &
-         DataInitialize, rc)
+    ! Register run and finalize methods with ESMF wrappers
+    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_RUN, &
+         ModelAdvance_ESMF, rc=rc)
+    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, file=__FILE__)) RETURN
+
+    CALL ESMF_GridCompSetEntryPoint(gcomp, ESMF_METHOD_FINALIZE, &
+         ModelFinalize_ESMF, rc=rc)
     IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
         line=__LINE__, file=__FILE__)) RETURN
 
@@ -649,6 +660,9 @@ CONTAINS
         RETURN
       ENDIF
 
+      ! ESMF regridding is now handled directly in hcoio_read_esmf_mod.F90
+      ! using ESMF-native field reading and regridding operations
+
       HcoInitialized = .TRUE.
     ENDIF
 
@@ -761,11 +775,6 @@ CONTAINS
       WRITE(*,*) "HEMCO-NUOPC: Setting clock with current time = ", TRIM(timeString)
     ENDIF
 
-    ! The model runs on the parent clock's timestep.
-    ! Use positional arguments instead of keyword arguments
-    CALL NUOPC_CompDefEntryPoint(gcomp, ESMF_METHOD_RUN, ModelAdvance, rc)
-    IF (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
-        line=__LINE__, file=__FILE__)) RETURN
 
   END SUBROUTINE SetClock
 
@@ -1190,5 +1199,57 @@ CONTAINS
 
   END SUBROUTINE HCOI_ESMF_FINAL
 !EOC
+
+  !-----------------------------------------------------------------------
+  ! ESMF wrapper routines for standard entry point signatures
+  !-----------------------------------------------------------------------
+
+  ! ESMF wrapper for InitializeP1 with full ESMF signature
+  SUBROUTINE InitializeP1_ESMF(gcomp, importState, exportState, clock, rc)
+    TYPE(ESMF_GridComp)     :: gcomp
+    TYPE(ESMF_State)        :: importState, exportState
+    TYPE(ESMF_Clock)        :: clock
+    INTEGER, INTENT(OUT)    :: rc
+
+    ! Call the original NUOPC-style routine
+    CALL InitializeP1(gcomp, importState, exportState, clock, rc)
+
+  END SUBROUTINE InitializeP1_ESMF
+
+  ! ESMF wrapper for InitializeP2 with full ESMF signature
+  SUBROUTINE InitializeP2_ESMF(gcomp, importState, exportState, clock, rc)
+    TYPE(ESMF_GridComp)     :: gcomp
+    TYPE(ESMF_State)        :: importState, exportState
+    TYPE(ESMF_Clock)        :: clock
+    INTEGER, INTENT(OUT)    :: rc
+
+    ! Call the original NUOPC-style routine
+    CALL InitializeP2(gcomp, importState, exportState, clock, rc)
+
+  END SUBROUTINE InitializeP2_ESMF
+
+  ! ESMF wrapper for ModelAdvance with full ESMF signature
+  SUBROUTINE ModelAdvance_ESMF(gcomp, importState, exportState, clock, rc)
+    TYPE(ESMF_GridComp)     :: gcomp
+    TYPE(ESMF_State)        :: importState, exportState
+    TYPE(ESMF_Clock)        :: clock
+    INTEGER, INTENT(OUT)    :: rc
+
+    ! Call the original NUOPC-style routine (which only takes gcomp and rc)
+    CALL ModelAdvance(gcomp, rc)
+
+  END SUBROUTINE ModelAdvance_ESMF
+
+  ! ESMF wrapper for ModelFinalize with full ESMF signature
+  SUBROUTINE ModelFinalize_ESMF(gcomp, importState, exportState, clock, rc)
+    TYPE(ESMF_GridComp)     :: gcomp
+    TYPE(ESMF_State)        :: importState, exportState
+    TYPE(ESMF_Clock)        :: clock
+    INTEGER, INTENT(OUT)    :: rc
+
+    ! Call the original NUOPC-style routine (which only takes gcomp and rc)
+    CALL ModelFinalize(gcomp, rc)
+
+  END SUBROUTINE ModelFinalize_ESMF
 
 END MODULE HCOI_ESMF_NUOPC_MOD

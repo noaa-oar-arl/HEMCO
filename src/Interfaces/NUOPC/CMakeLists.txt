@@ -13,7 +13,7 @@ add_library(HCOI_ESMF_NUOPC STATIC
 # Add dependencies
 target_link_libraries(HCOI_ESMF_NUOPC
     PUBLIC HCOI_Shared
-    PUBLIC HEMCO_Core
+    PUBLIC HCO
     PUBLIC ${ESMF_LIBRARIES}
 )
 
