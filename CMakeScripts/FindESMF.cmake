@@ -1,276 +1,169 @@
-# FindESMF.cmake
+# FindESMF.cmake -- Modern CMake module for ESMF
 #
-# Finds the ESMF library and includes
-#
-# This module sets the following variables:
-#  ESMF_FOUND - set to true if ESMF is found
-#  ESMF_INCLUDE_DIRS - paths to ESMF include directories
-#  ESMF_LIBRARIES - paths to ESMF libraries
-#  ESMF_VERSION - ESMF version if available
-#  NUOPC_FOUND - set to true if NUOPC is found
-#  NUOPC_LIBRARIES - paths to NUOPC libraries
-#
-# If ESMF is not found, this module will attempt to find it using:
-# 1. The ESMFMKFILE environment variable (best method)
-# 2. The ESMF_ROOT or ESMF_DIR environment variable
-# 3. Pkg-config if available
+# This module finds ESMF using either CMake targets or classic Makefile-based detection.
+# It creates a modern imported target 'ESMF::esmf' for use with target_link_libraries.
 
-# Function to extract information from esmf.mk file
-function(parse_esmfmkfile MKFILE OUTPUT_INCLUDES OUTPUT_LIBS OUTPUT_VERSION)
-  file(STRINGS "${MKFILE}" esmf_mk_contents)
+find_package(PkgConfig)
 
-  set(includes "")
-  set(libs "")
-  set(version "")
-
-  foreach(line ${esmf_mk_contents})
-    # Extract include paths
-    if(line MATCHES "^ESMF_F90COMPILEPATHS=(.*)$")
-      string(REGEX REPLACE "^ESMF_F90COMPILEPATHS=(.*)" "\\1" inc "${line}")
-      string(REPLACE "-I" "" inc "${inc}")
-      string(REPLACE " " ";" inc "${inc}")
-      set(includes ${inc})
-    endif()
-
-    # Extract library paths and names
-    if(line MATCHES "^ESMF_F90LINKPATHS=(.*)$")
-      string(REGEX REPLACE "^ESMF_F90LINKPATHS=(.*)" "\\1" lib_paths "${line}")
-      string(REPLACE "-L" "" lib_paths "${lib_paths}")
-      string(REPLACE " " ";" lib_paths "${lib_paths}")
-    endif()
-
-    if(line MATCHES "^ESMF_F90LINKRPATHS=(.*)$")
-      string(REGEX REPLACE "^ESMF_F90LINKRPATHS=(.*)" "\\1" lib_rpaths "${line}")
-      string(REPLACE "-Wl,-rpath," "" lib_rpaths "${lib_rpaths}")
-      string(REPLACE " " ";" lib_rpaths "${lib_rpaths}")
-    endif()
-
-    if(line MATCHES "^ESMF_F90ESMFLINKLIBS=(.*)$")
-      string(REGEX REPLACE "^ESMF_F90ESMFLINKLIBS=(.*)" "\\1" lib_names "${line}")
-      string(REPLACE " " ";" lib_names "${lib_names}")
-    endif()
-
-    # Extract version
-    if(line MATCHES "^ESMF_VERSION_STRING=(.*)")
-      string(REGEX REPLACE "^ESMF_VERSION_STRING=(.*)" "\\1" version "${line}")
-    endif()
-  endforeach()
-
-  # Construct full library paths
-  set(libraries "")
-  foreach(path ${lib_paths})
-    foreach(name ${lib_names})
-      if(EXISTS "${path}/lib${name}.so" OR EXISTS "${path}/lib${name}.a")
-        list(APPEND libraries "-L${path}" "-l${name}")
-      endif()
-    endforeach()
-
-    # Explicitly check for NUOPC library in the same path
-    if(EXISTS "${path}/libnuopc.so" OR EXISTS "${path}/libnuopc.a")
-      # Add NUOPC library explicitly
-      set(NUOPC_FOUND TRUE PARENT_SCOPE)
-      list(APPEND libraries "-L${path}" "-lnuopc")
-      message(STATUS "Found NUOPC library at ${path}")
-    endif()
-  endforeach()
-
-  # If no libraries found but we have lib_names, use them directly
-  if(NOT libraries AND lib_names)
-    set(libraries ${lib_names})
-    # Also add NUOPC if we're in default library mode
-    list(APPEND libraries "-lnuopc")
-    set(NUOPC_FOUND TRUE PARENT_SCOPE)
+# Prefer CMake-based ESMF targets if available
+if(TARGET ESMF::esmf)
+  message(STATUS "Using existing ESMF::esmf CMake target.")
+  set(ESMF_FOUND TRUE)
+  return()
+elseif(TARGET esmf)
+  message(STATUS "Using existing esmf CMake target.")
+  set(ESMF_FOUND TRUE)
+  # Create the canonical target
+  if(NOT TARGET ESMF::esmf)
+    add_library(ESMF::esmf ALIAS esmf)
   endif()
-
-  # Set return values
-  set(${OUTPUT_INCLUDES} ${includes} PARENT_SCOPE)
-  set(${OUTPUT_LIBS} ${libraries} PARENT_SCOPE)
-  set(${OUTPUT_VERSION} ${version} PARENT_SCOPE)
-endfunction()
-
-# First try: look for ESMFMKFILE environment variable (preferred method)
-if(NOT DEFINED ESMFMKFILE)
-  set(ESMFMKFILE $ENV{ESMFMKFILE})
+  return()
 endif()
 
-# Initialize NUOPC_FOUND to FALSE
-set(NUOPC_FOUND FALSE)
+# Classic Makefile-based ESMF detection
+if(NOT DEFINED ENV{ESMFMKFILE})
+  message(FATAL_ERROR "ESMFMKFILE env variable is not defined")
+endif()
+set(ESMFMKFILE $ENV{ESMFMKFILE})
+message(STATUS "ESMFMKFILE: ${ESMFMKFILE}")
 
-if(ESMFMKFILE)
-  if(EXISTS ${ESMFMKFILE})
-    message(STATUS "Found ESMF mkfile: ${ESMFMKFILE}")
-    parse_esmfmkfile(${ESMFMKFILE} ESMF_INCLUDE_DIRS ESMF_LIBRARIES ESMF_VERSION)
-  else()
-    message(WARNING "ESMFMKFILE specified but file does not exist: ${ESMFMKFILE}")
+# Parse esmf.mk for ESMF variables
+file(STRINGS ${ESMFMKFILE} esmf_mk_text)
+foreach(line ${esmf_mk_text})
+  string(REGEX REPLACE "^[ ]+" "" line ${line})
+  if(line MATCHES "^ESMF_.*=")
+    string(REGEX MATCH "^ESMF_[^=]+" esmf_name ${line})
+    string(REPLACE "${esmf_name}=" "" esmf_value ${line})
+    set(${esmf_name} "${esmf_value}" CACHE INTERNAL "ESMF var from esmf.mk")
   endif()
+endforeach()
+
+# Clean up and convert ESMF variables
+string(REPLACE "-I" "" ESMF_F90COMPILEPATHS ${ESMF_F90COMPILEPATHS})
+string(REPLACE " " ";" ESMF_F90COMPILEPATHS ${ESMF_F90COMPILEPATHS})
+
+# Set ESMF_VERSION_STRING for find_package_handle_standard_args
+if(ESMF_VERSION_MAJOR AND ESMF_VERSION_MINOR AND ESMF_VERSION_PATCH)
+  set(ESMF_VERSION_STRING "${ESMF_VERSION_MAJOR}.${ESMF_VERSION_MINOR}.${ESMF_VERSION_PATCH}")
 endif()
 
-# Second try: look for ESMF_ROOT or ESMF_DIR environment variable
-if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
-  set(ESMF_ROOT $ENV{ESMF_ROOT})
-  if(NOT ESMF_ROOT)
-    set(ESMF_ROOT $ENV{ESMF_DIR})
+# Ensure all required ESMF variables are set
+if(ESMF_VERSION_MAJOR AND ESMF_F90COMPILEPATHS AND ESMF_F90ESMFLINKRPATHS AND ESMF_F90ESMFLINKLIBS)
+  message(STATUS "Found ESMF:")
+  message(STATUS "  ESMF_VERSION_MAJOR:     ${ESMF_VERSION_MAJOR}")
+  message(STATUS "  ESMF_F90COMPILEPATHS:   ${ESMF_F90COMPILEPATHS}")
+  message(STATUS "  ESMF_F90ESMFLINKRPATHS: ${ESMF_F90ESMFLINKRPATHS}")
+  message(STATUS "  ESMF_F90ESMFLINKLIBS:   ${ESMF_F90ESMFLINKLIBS}")
+else()
+  message(FATAL_ERROR "One of the required ESMF_ variables is not defined.\nESMF_VERSION_MAJOR=${ESMF_VERSION_MAJOR}\nESMF_F90COMPILEPATHS=${ESMF_F90COMPILEPATHS}\nESMF_F90ESMFLINKRPATHS=${ESMF_F90ESMFLINKRPATHS}\nESMF_F90ESMFLINKLIBS=${ESMF_F90ESMFLINKLIBS}")
+endif()
+
+# Set ESMF_INCLUDE_DIRS and ESMF_LIBRARY_DIRS for modern CMake usage
+set(ESMF_INCLUDE_DIRS ${ESMF_F90COMPILEPATHS})
+set(ESMF_LIBRARY_DIRS "")
+
+# Parse ESMF_F90LINKPATHS to get all library directories
+string(REPLACE " " ";" ESMF_LINKPATH_LIST "${ESMF_F90LINKPATHS}")
+foreach(path ${ESMF_LINKPATH_LIST})
+  string(REGEX MATCH "^-L(.+)" _ "${path}")
+  if(CMAKE_MATCH_1 AND EXISTS "${CMAKE_MATCH_1}")
+    list(APPEND ESMF_LIBRARY_DIRS "${CMAKE_MATCH_1}")
+  endif()
+endforeach()
+
+# Also include directories from ESMF_F90ESMFLINKRPATHS for backwards compatibility
+foreach(rpath ${ESMF_F90ESMFLINKRPATHS})
+  string(REPLACE "-Wl,-rpath," "" rpath_cleaned "${rpath}")
+  if(EXISTS "${rpath_cleaned}")
+    list(APPEND ESMF_LIBRARY_DIRS "${rpath_cleaned}")
+  endif()
+endforeach()
+
+# Remove duplicates
+list(REMOVE_DUPLICATES ESMF_LIBRARY_DIRS)
+
+# Parse library paths and dependencies from ESMF_F90ESMFLINKLIBS
+string(REPLACE " " ";" ESMF_LINK_FLAGS_LIST "${ESMF_F90ESMFLINKLIBS}")
+
+# Find the actual ESMF library file
+set(ESMF_LIBRARY_FILE "")
+foreach(lib_dir ${ESMF_LIBRARY_DIRS})
+  find_library(ESMF_LIB_FOUND esmf PATHS ${lib_dir} NO_DEFAULT_PATH)
+  if(ESMF_LIB_FOUND)
+    set(ESMF_LIBRARY_FILE ${ESMF_LIB_FOUND})
+    message(STATUS "Found ESMF library: ${ESMF_LIBRARY_FILE}")
+    break()
+  endif()
+  unset(ESMF_LIB_FOUND CACHE)
+endforeach()
+
+if(NOT ESMF_LIBRARY_FILE)
+  message(FATAL_ERROR "Could not find libesmf in any of the ESMF library directories: ${ESMF_LIBRARY_DIRS}")
+endif()
+
+# Extract additional library dependencies (exclude ESMF itself and problematic libraries)
+set(ESMF_INTERFACE_LIBS "")
+foreach(flag ${ESMF_LINK_FLAGS_LIST})
+  # Skip ESMF library itself and NetCDF libraries (they should come from NetCDF targets)
+  if(flag MATCHES "^-l" AND NOT flag MATCHES "^-lesmf$" AND NOT flag MATCHES "^-lnetcdf")
+    list(APPEND ESMF_INTERFACE_LIBS ${flag})
+  elseif(flag MATCHES "\\.(a|so|dylib)$" AND NOT flag MATCHES "esmf" AND NOT flag MATCHES "netcdf")
+    # Include full path libraries (but not ESMF or NetCDF)
+    if(EXISTS ${flag})
+      list(APPEND ESMF_INTERFACE_LIBS ${flag})
+    endif()
+  endif()
+endforeach()
+
+# Create the ESMF imported target
+if(NOT TARGET ESMF::esmf)
+  add_library(ESMF::esmf UNKNOWN IMPORTED)
+
+  # Set the main ESMF library
+  set_target_properties(ESMF::esmf PROPERTIES
+    IMPORTED_LOCATION "${ESMF_LIBRARY_FILE}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ESMF_INCLUDE_DIRS}"
+  )
+
+  # Add interface link libraries if any (excluding NetCDF dependencies)
+  if(ESMF_INTERFACE_LIBS)
+    set_target_properties(ESMF::esmf PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${ESMF_INTERFACE_LIBS}"
+    )
   endif()
 
-  if(ESMF_ROOT)
-    # Try to find esmf.mk in the ESMF installation
-    file(GLOB_RECURSE ESMF_MKFILE_PATHS "${ESMF_ROOT}/*esmf.mk")
-
-    if(ESMF_MKFILE_PATHS)
-      list(GET ESMF_MKFILE_PATHS 0 ESMF_MKFILE)
-      message(STATUS "Found ESMF mkfile: ${ESMF_MKFILE}")
-      parse_esmfmkfile(${ESMF_MKFILE} ESMF_INCLUDE_DIRS ESMF_LIBRARIES ESMF_VERSION)
-    else()
-      # Manually try to find the components
-      find_path(ESMF_INCLUDE_DIR
-                NAMES ESMF.h ESMF_Init.h
-                PATHS ${ESMF_ROOT}/include ${ESMF_ROOT}/include/esmf
-                NO_DEFAULT_PATH)
-
-      find_library(ESMF_LIBRARY
-                   NAMES esmf
-                   PATHS ${ESMF_ROOT}/lib ${ESMF_ROOT}/lib64
-                   NO_DEFAULT_PATH)
-
-      # Explicitly look for NUOPC library
-      find_library(NUOPC_LIBRARY
-                   NAMES nuopc
-                   PATHS ${ESMF_ROOT}/lib ${ESMF_ROOT}/lib64
-                   NO_DEFAULT_PATH)
-
-      if(ESMF_INCLUDE_DIR AND ESMF_LIBRARY)
-        set(ESMF_INCLUDE_DIRS ${ESMF_INCLUDE_DIR})
-        set(ESMF_LIBRARIES ${ESMF_LIBRARY})
-
-        # Add NUOPC if found
-        if(NUOPC_LIBRARY)
-          set(NUOPC_FOUND TRUE)
-          set(NUOPC_LIBRARIES ${NUOPC_LIBRARY})
-          list(APPEND ESMF_LIBRARIES ${NUOPC_LIBRARY})
-          message(STATUS "Found NUOPC: ${NUOPC_LIBRARY}")
-        endif()
-      endif()
-    endif()
+  # Add library directories to the target's interface
+  if(ESMF_LIBRARY_DIRS)
+    set_target_properties(ESMF::esmf PROPERTIES
+      INTERFACE_LINK_DIRECTORIES "${ESMF_LIBRARY_DIRS}"
+    )
   endif()
 endif()
 
-# Third try: use pkg-config
-if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
-  find_package(PkgConfig QUIET)
-  if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PC_ESMF QUIET esmf)
-    if(PC_ESMF_FOUND)
-      set(ESMF_INCLUDE_DIRS ${PC_ESMF_INCLUDE_DIRS})
-      set(ESMF_LIBRARIES ${PC_ESMF_LIBRARIES})
-      set(ESMF_VERSION ${PC_ESMF_VERSION})
-
-      # Look for NUOPC using pkg-config
-      pkg_check_modules(PC_NUOPC QUIET nuopc)
-      if(PC_NUOPC_FOUND)
-        set(NUOPC_FOUND TRUE)
-        set(NUOPC_LIBRARIES ${PC_NUOPC_LIBRARIES})
-        list(APPEND ESMF_LIBRARIES ${PC_NUOPC_LIBRARIES})
-        message(STATUS "Found NUOPC via pkg-config")
-      endif()
-    endif()
-  endif()
+# Create esmf alias for backwards compatibility
+if(NOT TARGET esmf)
+  add_library(esmf ALIAS ESMF::esmf)
 endif()
 
-# Last try: system paths
-if(NOT ESMF_INCLUDE_DIRS OR NOT ESMF_LIBRARIES)
-  find_path(ESMF_INCLUDE_DIR
-            NAMES ESMF.h ESMF_Init.h
-            PATHS /usr/include /usr/local/include /opt/include
-            PATH_SUFFIXES esmf)
+set(ESMF_FOUND TRUE)
 
-  find_library(ESMF_LIBRARY
-               NAMES esmf
-               PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/lib /opt/lib64)
+# Print summary for diagnostics
+message(STATUS "==== ESMF CMake Summary ====")
+message(STATUS "ESMF_FOUND:           ${ESMF_FOUND}")
+message(STATUS "ESMF_VERSION_STRING:  ${ESMF_VERSION_STRING}")
+message(STATUS "ESMF_INCLUDE_DIRS:    ${ESMF_INCLUDE_DIRS}")
+message(STATUS "ESMF_LIBRARY_DIRS:    ${ESMF_LIBRARY_DIRS}")
+message(STATUS "ESMF_LIBRARY_FILE:    ${ESMF_LIBRARY_FILE}")
+message(STATUS "ESMF_INTERFACE_LIBS:  ${ESMF_INTERFACE_LIBS}")
+message(STATUS "=============================")
 
-  # # Look for NUOPC library in system paths
-  # find_library(NUOPC_LIBRARY
-  #              NAMES nuopc
-  #              PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/lib /opt/lib64)
-
-  if(ESMF_INCLUDE_DIR AND ESMF_LIBRARY)
-    set(ESMF_INCLUDE_DIRS ${ESMF_INCLUDE_DIR})
-    set(ESMF_LIBRARIES ${ESMF_LIBRARY})
-
-    # # Add NUOPC if found
-    # if(NUOPC_LIBRARY)
-    #   set(NUOPC_FOUND TRUE)
-    #   set(NUOPC_LIBRARIES ${NUOPC_LIBRARY})
-    #   list(APPEND ESMF_LIBRARIES ${NUOPC_LIBRARY})
-    #   message(STATUS "Found NUOPC: ${NUOPC_LIBRARY}")
-    # endif()
-  endif()
-endif()
-
-# If NUOPC wasn't found but we have ESMF, try to locate it by inserting -lnuopc
-# if(NOT NUOPC_FOUND AND ESMF_FOUND)
-#   foreach(lib_path ${ESMF_LIBRARIES})
-#     if(lib_path MATCHES "^-L(.*)")
-#       string(REGEX REPLACE "^-L(.*)" "\\1" path "${lib_path}")
-#       if(EXISTS "${path}/libnuopc.so" OR EXISTS "${path}/libnuopc.a")
-#         set(NUOPC_FOUND TRUE)
-#         set(NUOPC_LIBRARIES "-lnuopc")
-#         list(APPEND ESMF_LIBRARIES "-lnuopc")
-#         message(STATUS "Found NUOPC library in ESMF path: ${path}")
-#         break()
-#       endif()
-#     endif()
-#   endforeach()
-
-#   # If we still didn't find NUOPC, just add -lnuopc and hope it works
-#   if(NOT NUOPC_FOUND)
-#     set(NUOPC_FOUND TRUE)
-#     set(NUOPC_LIBRARIES "-lnuopc")
-#     list(APPEND ESMF_LIBRARIES "-lnuopc")
-#     message(STATUS "Adding NUOPC library to link line (assuming it exists with ESMF)")
-#   endif()
-# endif()
-
-# Handle the QUIETLY and REQUIRED arguments and set ESMF_FOUND
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(ESMF
-                                  REQUIRED_VARS ESMF_LIBRARIES ESMF_INCLUDE_DIRS
-                                  VERSION_VAR ESMF_VERSION)
-
-if(ESMF_FOUND)
-  # Create an imported target for ESMF
-  if(NOT TARGET ESMF::ESMF)
-    add_library(ESMF::ESMF INTERFACE IMPORTED)
-    set_target_properties(ESMF::ESMF PROPERTIES
-      INTERFACE_INCLUDE_DIRECTORIES "${ESMF_INCLUDE_DIRS}"
-      INTERFACE_LINK_LIBRARIES "${ESMF_LIBRARIES}")
-  endif()
-
-  # Alias the target to match what the code is looking for
-  if(NOT TARGET ESMF)
-    add_library(ESMF ALIAS ESMF::ESMF)
-  endif()
-
-  # Create NUOPC target if found
-  if(NUOPC_FOUND AND NOT TARGET ESMF::NUOPC)
-    add_library(ESMF::NUOPC INTERFACE IMPORTED)
-    set_target_properties(ESMF::NUOPC PROPERTIES
-      INTERFACE_INCLUDE_DIRECTORIES "${ESMF_INCLUDE_DIRS}"
-      INTERFACE_LINK_LIBRARIES "${NUOPC_LIBRARIES}")
-
-    # Alias the target
-    if(NOT TARGET NUOPC)
-      add_library(NUOPC ALIAS ESMF::NUOPC)
-    endif()
-  endif()
-
-  message(STATUS "Found ESMF: ${ESMF_LIBRARIES}")
-  if(ESMF_VERSION)
-    message(STATUS "ESMF version: ${ESMF_VERSION}")
-  endif()
-
-  if(NUOPC_FOUND)
-    message(STATUS "Found NUOPC: ${NUOPC_LIBRARIES}")
-  else()
-    message(WARNING "NUOPC library not found. This may cause linking errors for NUOPC interfaces.")
-  endif()
-endif()
+  FOUND_VAR ESMF_FOUND
+  REQUIRED_VARS
+    ESMF_LIBRARY_FILE
+    ESMF_F90COMPILEPATHS
+    ESMF_F90ESMFLINKRPATHS
+    ESMF_F90ESMFLINKLIBS
+  VERSION_VAR ESMF_VERSION_STRING
+)

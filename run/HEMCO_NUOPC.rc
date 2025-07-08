@@ -3,7 +3,7 @@
 
 # Core HEMCO configuration parameters
 HEMCO_CORE::
-HEMCO_CONFIG      HEMCO_Config.rc.nuopc    # Main HEMCO configuration file
+HEMCO_CONFIG      HEMCO_Config.rc    # Main HEMCO configuration file
 HEMCO_DIAGN       HEMCO_Diagn.rc     # HEMCO diagnostics configuration file
 HEMCO_LOGFILE     HEMCO.log          # HEMCO log file name
 HEMCO_DATA_ROOT   ./                 # Root directory for HEMCO data

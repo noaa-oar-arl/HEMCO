@@ -20,6 +20,7 @@ MODULE HCO_ESMF_REGRID_MOD
 #if defined ( ESMF_ ) && (!defined ( MAPL_ESMF ))
   USE HCO_ERROR_MOD
   USE HCO_PRECISION_MOD
+  USE HCO_TYPES_MOD, ONLY : HcoOpt, ConfigObj
   USE ESMF
 #endif
 
@@ -255,12 +256,14 @@ CONTAINS
 ! !LOCAL VARIABLES:
 !
     LOGICAL :: RouteHandleCreated
+    LOGICAL :: fileExists
     INTEGER :: srcTermProcessing
     TYPE(ESMF_RegridMethod_Flag) :: ESMFMethod
     TYPE(ESMF_UnmappedAction_Flag) :: UnmappedAction
     TYPE(ESMF_PoleMethod_Flag) :: PoleMethod
     TYPE(ESMF_LineType_Flag) :: LineType
     TYPE(ESMF_NormType_Flag) :: NormType
+    CHARACTER(LEN=255) :: LOC = 'HCO_ESMF_PerformRegrid (hco_esmf_regrid_mod.F90)'
 
     !=================================================================
     ! HCO_ESMF_PerformRegrid begins here
@@ -288,19 +291,47 @@ CONTAINS
         IF (RC /= HCO_SUCCESS) RETURN
 
         IF (LEN_TRIM(WeightFile) > 0 .AND. TRIM(WeightFile) /= '-') THEN
-            ! Use existing weight file - this would need to be implemented
-            ! with ESMF_FieldSMMStore reading from file
-            ! For now, generate weights on the fly
-            CALL ESMF_FieldRegridStore(SrcField, DstField, &
-                regridmethod=ESMFMethod, &
-                unmappedaction=UnmappedAction, &
-                srcTermProcessing=srcTermProcessing, &
-                polemethod=PoleMethod, &
-                lineType=LineType, &
-                normType=NormType, &
-                routehandle=RouteHandle, rc=RC)
+            ! Use existing weight file if it exists
+            INQUIRE(FILE=TRIM(WeightFile), EXIST=fileExists)
+
+            IF (fileExists) THEN
+                ! Use ESMF_FieldSMMStore to read weights from file
+                CALL ESMF_FieldSMMStore(SrcField, DstField, &
+                    filename=TRIM(WeightFile), &
+                    routehandle=RouteHandle, rc=RC)
+
+                IF (RC /= ESMF_SUCCESS) THEN
+                    ! If weight file read fails, fall back to generating weights
+                    CALL HCO_ERROR('Failed to read weights from file, generating on the fly', &
+                        RC, THISLOC=LOC)
+
+                    ! Generate weights on the fly as fallback
+                    CALL ESMF_FieldRegridStore(SrcField, DstField, &
+                        regridmethod=ESMFMethod, &
+                        unmappedaction=UnmappedAction, &
+                        srcTermProcessing=srcTermProcessing, &
+                        polemethod=PoleMethod, &
+                        lineType=LineType, &
+                        normType=NormType, &
+                        routehandle=RouteHandle, rc=RC)
+                ENDIF
+            ELSE
+                ! Weight file specified but not found - generate weights and warn
+                CALL HCO_ERROR('Weight file not found, generating weights on the fly', &
+                    RC, THISLOC=LOC)
+
+                ! Generate weights on the fly
+                CALL ESMF_FieldRegridStore(SrcField, DstField, &
+                    regridmethod=ESMFMethod, &
+                    unmappedaction=UnmappedAction, &
+                    srcTermProcessing=srcTermProcessing, &
+                    polemethod=PoleMethod, &
+                    lineType=LineType, &
+                    normType=NormType, &
+                    routehandle=RouteHandle, rc=RC)
+            ENDIF
         ELSE
-            ! Generate weights on the fly
+            ! No weight file specified - generate weights on the fly
             CALL ESMF_FieldRegridStore(SrcField, DstField, &
                 regridmethod=ESMFMethod, &
                 unmappedaction=UnmappedAction, &
@@ -311,11 +342,20 @@ CONTAINS
                 routehandle=RouteHandle, rc=RC)
         ENDIF
 
-        IF (RC /= ESMF_SUCCESS) RETURN
+    IF (RC /= ESMF_SUCCESS) THEN
+        RC = HCO_FAIL
+        RETURN
+    ENDIF
+    RC = HCO_SUCCESS
     ENDIF
 
     ! Perform the regridding
     CALL ESMF_FieldRegrid(SrcField, DstField, RouteHandle, rc=RC)
+    IF (RC /= ESMF_SUCCESS) THEN
+        RC = HCO_FAIL
+        RETURN
+    ENDIF
+    RC = HCO_SUCCESS
 
   END SUBROUTINE HCO_ESMF_PerformRegrid
 !EOC
@@ -364,6 +404,7 @@ CONTAINS
     TYPE(ESMF_PoleMethod_Flag) :: PoleMethod
     TYPE(ESMF_LineType_Flag) :: LineType
     TYPE(ESMF_NormType_Flag) :: NormType
+    CHARACTER(LEN=255) :: LOC = 'HCO_ESMF_CreateWeights (hco_esmf_regrid_mod.F90)'
 
     !=================================================================
     ! HCO_ESMF_CreateWeights begins here
@@ -381,8 +422,6 @@ CONTAINS
     IF (RC /= HCO_SUCCESS) RETURN
 
     ! Create regridding weights
-    ! Note: ESMF_FieldRegridStore doesn't directly save to file in this interface
-    ! Weight files would need to be generated using other ESMF utilities
     CALL ESMF_FieldRegridStore(SrcField, DstField, &
         regridmethod=ESMFMethod, &
         unmappedaction=UnmappedAction, &
@@ -392,9 +431,27 @@ CONTAINS
         normType=NormType, &
         routehandle=RouteHandle, rc=RC)
 
-    IF (RC == ESMF_SUCCESS) THEN
+    IF (RC == ESMF_SUCCESS) THEN        ! If weight file path is provided, attempt to save the weights
+        IF (LEN_TRIM(WeightFile) > 0 .AND. TRIM(WeightFile) /= '-') THEN
+            ! Write weights to file using ESMF_FieldSMMStore
+            CALL ESMF_FieldSMMStore(SrcField, DstField, &
+                filename=TRIM(WeightFile), &
+                routehandle=RouteHandle, &
+                rc=RC)
+
+            IF (RC /= ESMF_SUCCESS) THEN
+                CALL HCO_ERROR('Failed to write weights to file', RC, THISLOC=LOC)
+                RC = HCO_FAIL
+            ELSE
+                RC = HCO_SUCCESS
+            ENDIF
+        ENDIF
+
         ! Clean up the route handle since we only wanted the weights
         CALL ESMF_RouteHandleDestroy(RouteHandle, rc=RC)
+        RC = HCO_SUCCESS
+    ELSE
+        RC = HCO_FAIL
     ENDIF
 
   END SUBROUTINE HCO_ESMF_CreateWeights
@@ -410,15 +467,22 @@ CONTAINS
 ! !IROUTINE: HCO_ESMF_GetRegridSpec
 !
 ! !DESCRIPTION: Get regridding specification for a container.
+! This function provides regridding specifications based on:
+!  1. Parameters passed from HEMCO configuration
+!  2. Container-specific settings from the data configuration
+!  3. Default fallback settings
 !\\
 !\\
 ! !INTERFACE:
 !
-  SUBROUTINE HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, Found, RC)
+  SUBROUTINE HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, Found, RC, &
+                                    DefaultMethod, WeightDir)
 !
 ! !INPUT PARAMETERS:
 !
     CHARACTER(LEN=*), INTENT(IN) :: ContainerName  ! Container name
+    CHARACTER(LEN=*), INTENT(IN), OPTIONAL :: DefaultMethod ! Default regrid method
+    CHARACTER(LEN=*), INTENT(IN), OPTIONAL :: WeightDir ! Weight files directory
 !
 ! !OUTPUT PARAMETERS:
 !
@@ -431,9 +495,17 @@ CONTAINS
 !
 ! !REVISION HISTORY:
 !  01 Jul 2025 - Initial version
+!  07 Jul 2025 - Updated to accept HEMCO configuration parameters
 !EOP
 !------------------------------------------------------------------------------
 !BOC
+!
+! !LOCAL VARIABLES:
+!
+    CHARACTER(LEN=255) :: LOC = 'HCO_ESMF_GetRegridSpec (hco_esmf_regrid_mod.F90)'
+    CHARACTER(LEN=255) :: WeightFileName
+    CHARACTER(LEN=63) :: Method
+
     !=================================================================
     ! HCO_ESMF_GetRegridSpec begins here
     !=================================================================
@@ -447,9 +519,39 @@ CONTAINS
     RegridSpec%Options = ''
     RegridSpec%IsActive = .FALSE.
 
-    ! For now, this is a placeholder that doesn't find any specs
-    ! In a full implementation, this would look up regrid specifications
-    ! from configuration files or data structures
+    ! Set container name
+    RegridSpec%ContainerName = TRIM(ContainerName)
+
+    ! Determine regrid method
+    IF (PRESENT(DefaultMethod)) THEN
+      Method = TRIM(DefaultMethod)
+    ELSE
+      Method = 'CONSERVE'  ! Fallback default
+    ENDIF
+
+    ! Check for valid method
+    IF (LEN_TRIM(Method) == 0 .OR. TRIM(Method) == '-') THEN
+      Method = 'CONSERVE'
+    ENDIF
+    RegridSpec%RegridMethod = Method
+
+    ! Construct weight file path if directory is specified
+    IF (PRESENT(WeightDir)) THEN
+      IF (LEN_TRIM(WeightDir) > 0 .AND. TRIM(WeightDir) /= '-') THEN
+        ! Create a standardized weight filename
+        WeightFileName = TRIM(WeightDir) // '/' &
+                       // TRIM(ContainerName) // '_' &
+                       // TRIM(Method) // '_weights.nc'
+        RegridSpec%WeightFile = WeightFileName
+      ENDIF
+    ENDIF
+
+    ! Set options string to empty for now
+    RegridSpec%Options = ''
+
+    ! Activate the spec and mark as found
+    RegridSpec%IsActive = .TRUE.
+    Found = .TRUE.
 
   END SUBROUTINE HCO_ESMF_GetRegridSpec
 !EOC

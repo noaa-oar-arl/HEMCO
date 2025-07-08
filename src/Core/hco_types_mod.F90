@@ -480,6 +480,17 @@ MODULE HCO_TYPES_MOD
      LOGICAL                      :: ConfigFileRead = .FALSE.
      LOGICAL                      :: amIRoot    ! Is this the root CPU?
      LOGICAL                      :: doVerbose  ! Is this CPU verbose?
+     ! ESMF regridding settings from config file
+#if defined(ESMF_) && !defined(MAPL_ESMF)
+     CHARACTER(LEN=255)           :: ESMFRegridWeightDir = '' ! Directory for weight files
+     CHARACTER(LEN=63)            :: ESMFRegridDefaultMethod = 'CONSERVE' ! Default regrid method
+     LOGICAL                      :: ESMFRegridWriteWeights = .FALSE. ! Write weight files?
+     LOGICAL                      :: ESMFRegridValidate = .FALSE. ! Validate regridding?
+     LOGICAL                      :: ESMFRegridWeightOnly = .FALSE. ! Only use weight files?
+     CHARACTER(LEN=63)            :: ESMFRegridPoleMethod = 'ALLAVG' ! Pole handling method
+     CHARACTER(LEN=63)            :: ESMFRegridLineType = 'GREAT_CIRCLE' ! Line type
+     CHARACTER(LEN=63)            :: ESMFRegridNormType = 'DSTAREA' ! Normalization type
+#endif
   END TYPE ConfigObj
 
   !------------------------------------------------------------------------

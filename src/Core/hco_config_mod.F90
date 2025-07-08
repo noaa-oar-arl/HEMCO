@@ -2122,6 +2122,48 @@ CONTAINS
           RETURN
        ENDIF
 
+       ! Special handling for ESMF regridding settings
+       ! Store them directly in HcoConfig for use in regridding operations
+#ifdef defined(ESMF_) && !defined(MAPL_ESMF)
+       IF ( INDEX(TRIM(LINE), 'USE_ESMF_REGRID') > 0 ) THEN
+          ! Store in HcoConfig for later use - will be transferred to Options
+          CALL GetExtOpt( HcoConfig, CoreNr, 'USE_ESMF_REGRID', &
+                         OptValBool=found, &  ! Temporary storage - handled elsewhere
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'DEFAULT_REGRID_METHOD') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'DEFAULT_REGRID_METHOD', &
+                         OptValChar=HcoConfig%ESMFRegridDefaultMethod, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_WEIGHT_DIR') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_WEIGHT_DIR', &
+                         OptValChar=HcoConfig%ESMFRegridWeightDir, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_VALIDATE') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_VALIDATE', &
+                         OptValBool=HcoConfig%ESMFRegridValidate, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_WRITE_WEIGHTS') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_WRITE_WEIGHTS', &
+                         OptValBool=HcoConfig%ESMFRegridWriteWeights, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_WEIGHT_ONLY') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_WEIGHT_ONLY', &
+                         OptValBool=HcoConfig%ESMFRegridWeightOnly, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_POLE_METHOD') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_POLE_METHOD', &
+                         OptValChar=HcoConfig%ESMFRegridPoleMethod, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_LINE_TYPE') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_LINE_TYPE', &
+                         OptValChar=HcoConfig%ESMFRegridLineType, &
+                         Found=found, RC=RC )
+       ELSEIF ( INDEX(TRIM(LINE), 'ESMF_REGRID_NORM_TYPE') > 0 ) THEN
+          CALL GetExtOpt( HcoConfig, CoreNr, 'ESMF_REGRID_NORM_TYPE', &
+                         OptValChar=HcoConfig%ESMFRegridNormType, &
+                         Found=found, RC=RC )
+       ENDIF
+#endif
     ENDDO
 
 #ifndef MODEL_GEOS

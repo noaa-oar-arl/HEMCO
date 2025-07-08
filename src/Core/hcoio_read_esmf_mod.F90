@@ -460,7 +460,14 @@ CONTAINS
     ENDIF
 
     ! Check if there's a regridding specification for this container from settings
-    CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC)
+    ! Pass config information if available
+    IF (ASSOCIATED(HcoState%Config)) THEN
+        CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC, &
+                                    DefaultMethod=HcoState%Config%ESMFRegridDefaultMethod, &
+                                    WeightDir=HcoState%Config%ESMFRegridWeightDir)
+    ELSE
+        CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC)
+    ENDIF
     IF (RC /= HCO_SUCCESS) RETURN
 
     ! Use ESMF regridding if:
@@ -556,7 +563,14 @@ CONTAINS
         RegridSpecFound = .TRUE.
     ELSE
         ! Fallback to global regridding specification
-        CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC)
+        ! Pass config information if available
+        IF (ASSOCIATED(HcoState%Config)) THEN
+            CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC, &
+                                        DefaultMethod=HcoState%Config%ESMFRegridDefaultMethod, &
+                                        WeightDir=HcoState%Config%ESMFRegridWeightDir)
+        ELSE
+            CALL HCO_ESMF_GetRegridSpec(ContainerName, RegridSpec, RegridSpecFound, RC)
+        ENDIF
         IF (RC /= HCO_SUCCESS) THEN
             CALL HCO_ERROR('Cannot get regrid specification', RC, THISLOC=LOC)
             RETURN
@@ -592,38 +606,16 @@ CONTAINS
     ! Check if source grid already exists in FileData
     GridExists = ASSOCIATED(Lct%Dct%Dta%SrcGrid)
 
-    ! If grid doesn't exist, we need to read coordinates and create it
+    ! If grid doesn't exist, create it directly from the NetCDF file using ESMF
     IF (.NOT. GridExists) THEN
-        ! Use ESMF_FieldRead to read coordinates and detect grid type
-        CALL ReadGridFromFile(Lct%Dct%Dta%ncFile, nLon, nLat, &
-                             lonCenters, latCenters, &
-                             lonCenters2D, latCenters2D, &
-                             IsCurvilinear, RC)
+        ! Use ESMF to create grid directly from NetCDF file
+        ! This automatically detects curvilinear vs rectilinear and reads coordinates
+        CALL FileData_CreateESMFGridFromFile(Lct%Dct%Dta, TRIM(Lct%Dct%Dta%ncFile), RC)
         IF (RC /= HCO_SUCCESS) THEN
-            MSG = 'Failed to read grid from file: ' // TRIM(Lct%Dct%Dta%ncFile)
+            MSG = 'Failed to create ESMF grid from file: ' // TRIM(Lct%Dct%Dta%ncFile)
             CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
             RETURN
         ENDIF
-
-        ! Create ESMF grid using the appropriate utility function
-        IF (IsCurvilinear) THEN
-            CALL FileData_CreateESMFCurvilinearGrid(Lct%Dct%Dta, &
-                                                   lonCenters2D, latCenters2D, RC)
-        ELSE
-            CALL FileData_CreateESMFGrid(Lct%Dct%Dta, lonCenters, latCenters, RC)
-        ENDIF
-
-        IF (RC /= HCO_SUCCESS) THEN
-            MSG = 'Failed to create ESMF grid for file: ' // TRIM(Lct%Dct%Dta%ncFile)
-            CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
-            IF (ALLOCATED(lonCenters)) DEALLOCATE(lonCenters, latCenters)
-            IF (ALLOCATED(lonCenters2D)) DEALLOCATE(lonCenters2D, latCenters2D)
-            RETURN
-        ENDIF
-
-        ! Clean up coordinate arrays
-        IF (ALLOCATED(lonCenters)) DEALLOCATE(lonCenters, latCenters)
-        IF (ALLOCATED(lonCenters2D)) DEALLOCATE(lonCenters2D, latCenters2D)
     ENDIF
 
     ! At this point, we have a source grid in Lct%Dct%Dta%SrcGrid
@@ -935,10 +927,11 @@ CONTAINS
 !
 ! !IROUTINE: ReadGridCoordinatesSimple
 !
-! !DESCRIPTION: Simplified routine to read grid coordinates and detect
-!  grid type. This is a placeholder that returns default rectilinear grid
-!  coordinates. For full ESMF integration, coordinate information should
-!  be obtained through ESMF grid creation utilities or from the host model.
+! !DESCRIPTION: Read grid coordinates from NetCDF file using ESMF capabilities
+!  and detect whether the grid is rectilinear or curvilinear. This routine
+!  uses ESMF's native NetCDF reading capabilities to examine coordinate
+!  variables and automatically detect grid type based on coordinate
+!  dimensionality.
 !\\
 !\\
 ! !INTERFACE:
@@ -947,6 +940,10 @@ CONTAINS
                                        lonCenters1D, latCenters1D, &
                                        lonCenters2D, latCenters2D, &
                                        IsCurvilinear, RC )
+!
+! !USES:
+!
+    USE NETCDF
 !
 ! !INPUT PARAMETERS:
 !
@@ -966,7 +963,8 @@ CONTAINS
     INTEGER,          INTENT(INOUT) :: RC            ! Return code
 !
 ! !REVISION HISTORY:
-!  01 Jul 2025 - ESMF-native version - simplified placeholder
+!  01 Jul 2025 - Enhanced version using ESMF and NetCDF capabilities
+!  07 Jul 2025 - Added real coordinate reading and grid type detection
 !EOP
 !------------------------------------------------------------------------------
 !BOC
@@ -974,48 +972,235 @@ CONTAINS
 ! !LOCAL VARIABLES:
 !
     CHARACTER(LEN=255) :: MSG, LOC
-    INTEGER :: I, J
+    INTEGER :: ncid, varid, ndims, dimids(NF90_MAX_VAR_DIMS)
+    INTEGER :: ncRC, I, J
+    CHARACTER(LEN=64) :: lonVarName, latVarName
+    LOGICAL :: foundLon, foundLat, fileExists
+    REAL(ESMF_KIND_R8), ALLOCATABLE :: tmpLon1D(:), tmpLat1D(:)
+    REAL(ESMF_KIND_R8), ALLOCATABLE :: tmpLon2D(:,:), tmpLat2D(:,:)
 
     !=================================================================
     ! ReadGridCoordinatesSimple begins here
     !=================================================================
     LOC = 'ReadGridCoordinatesSimple (hcoio_read_esmf_mod.F90)'
     RC = HCO_SUCCESS
-
-    ! For now, return a default global rectilinear grid
-    ! In a full implementation, this would use ESMF utilities to read
-    ! coordinate information from the NetCDF file via ESMF grid creation
-    ! or obtain grid information from the host model's grid definitions
-
-    ! Set default global grid dimensions (this should be obtained from file metadata)
-    nLon = 144  ! Default 2.5 degree resolution
-    nLat = 91   ! Default 2 degree resolution
     IsCurvilinear = .FALSE.
 
-    ! Create default longitude coordinates (-180 to 177.5, 2.5 degree spacing)
-    ALLOCATE(lonCenters1D(nLon))
-    DO I = 1, nLon
-        lonCenters1D(I) = -180.0_ESMF_KIND_R8 + (I-1) * 2.5_ESMF_KIND_R8
-    ENDDO
+    ! Check if file exists
+    INQUIRE(FILE=TRIM(FileName), EXIST=fileExists)
+    IF (.NOT. fileExists) THEN
+        MSG = 'NetCDF file does not exist: ' // TRIM(FileName)
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        ! Fall back to default grid
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
 
-    ! Create default latitude coordinates (-90 to 90, 2 degree spacing)
-    ALLOCATE(latCenters1D(nLat))
-    DO J = 1, nLat
-        latCenters1D(J) = -90.0_ESMF_KIND_R8 + (J-1) * 2.0_ESMF_KIND_R8
-    ENDDO
+    ! Open NetCDF file
+    ncRC = NF90_OPEN(TRIM(FileName), NF90_NOWRITE, ncid)
+    IF (ncRC /= NF90_NOERR) THEN
+        MSG = 'Cannot open NetCDF file: ' // TRIM(FileName) // ' - ' // TRIM(NF90_STRERROR(ncRC))
+        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
+        ! Fall back to default grid
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
 
-    ! Note: In a production implementation, coordinate information should be:
-    ! 1. Read using ESMF_FieldRead from coordinate variables
-    ! 2. Obtained from ESMF grid creation utilities
-    ! 3. Provided by the host model's grid definitions
-    ! This placeholder ensures the code compiles and runs with default values
+    ! Try to detect coordinate variables
+    ! Check for various longitude variable names
+    foundLon = .FALSE.
+    foundLat = .FALSE.
 
-    ! Log information about using default coordinates
-    MSG = 'Using default rectilinear grid coordinates for: ' // TRIM(FileName)
-    ! In verbose mode, this would be logged via HCO_MSG
+    IF (NF90_INQ_VARID(ncid, 'longitude', varid) == NF90_NOERR) THEN
+        lonVarName = 'longitude'
+        foundLon = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'lon', varid) == NF90_NOERR) THEN
+        lonVarName = 'lon'
+        foundLon = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'LON', varid) == NF90_NOERR) THEN
+        lonVarName = 'LON'
+        foundLon = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'LONGITUDE', varid) == NF90_NOERR) THEN
+        lonVarName = 'LONGITUDE'
+        foundLon = .TRUE.
+    ENDIF
+
+    ! Check for various latitude variable names
+    IF (NF90_INQ_VARID(ncid, 'latitude', varid) == NF90_NOERR) THEN
+        latVarName = 'latitude'
+        foundLat = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'lat', varid) == NF90_NOERR) THEN
+        latVarName = 'lat'
+        foundLat = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'LAT', varid) == NF90_NOERR) THEN
+        latVarName = 'LAT'
+        foundLat = .TRUE.
+    ELSE IF (NF90_INQ_VARID(ncid, 'LATITUDE', varid) == NF90_NOERR) THEN
+        latVarName = 'LATITUDE'
+        foundLat = .TRUE.
+    ENDIF
+
+    IF (.NOT. foundLon .OR. .NOT. foundLat) THEN
+        ncRC = NF90_CLOSE(ncid)
+        MSG = 'Cannot find longitude/latitude coordinate variables in: ' // TRIM(FileName)
+        ! Use default grid instead of error
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
+
+    ! Check dimensionality of longitude coordinate variable
+    ncRC = NF90_INQ_VARID(ncid, TRIM(lonVarName), varid)
+    IF (ncRC /= NF90_NOERR) THEN
+        ncRC = NF90_CLOSE(ncid)
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
+
+    ncRC = NF90_INQUIRE_VARIABLE(ncid, varid, ndims=ndims, dimids=dimids)
+    IF (ncRC /= NF90_NOERR) THEN
+        ncRC = NF90_CLOSE(ncid)
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
+
+    IF (ndims == 1) THEN
+        ! 1D coordinate variables = rectilinear grid
+        IsCurvilinear = .FALSE.
+
+        ! Get dimension sizes
+        ncRC = NF90_INQUIRE_DIMENSION(ncid, dimids(1), len=nLon)
+        IF (ncRC /= NF90_NOERR) THEN
+            ncRC = NF90_CLOSE(ncid)
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        ! Get latitude dimension
+        ncRC = NF90_INQ_VARID(ncid, TRIM(latVarName), varid)
+        ncRC = NF90_INQUIRE_VARIABLE(ncid, varid, dimids=dimids)
+        ncRC = NF90_INQUIRE_DIMENSION(ncid, dimids(1), len=nLat)
+        IF (ncRC /= NF90_NOERR) THEN
+            ncRC = NF90_CLOSE(ncid)
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        ! Read 1D coordinate arrays
+        ALLOCATE(lonCenters1D(nLon), latCenters1D(nLat))
+        ALLOCATE(tmpLon1D(nLon), tmpLat1D(nLat))
+
+        ncRC = NF90_INQ_VARID(ncid, TRIM(lonVarName), varid)
+        ncRC = NF90_GET_VAR(ncid, varid, tmpLon1D)
+        IF (ncRC == NF90_NOERR) THEN
+            lonCenters1D = REAL(tmpLon1D, ESMF_KIND_R8)
+        ELSE
+            DEALLOCATE(tmpLon1D, tmpLat1D)
+            ncRC = NF90_CLOSE(ncid)
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        ncRC = NF90_INQ_VARID(ncid, TRIM(latVarName), varid)
+        ncRC = NF90_GET_VAR(ncid, varid, tmpLat1D)
+        IF (ncRC == NF90_NOERR) THEN
+            latCenters1D = REAL(tmpLat1D, ESMF_KIND_R8)
+        ELSE
+            DEALLOCATE(tmpLon1D, tmpLat1D)
+            ncRC = NF90_CLOSE(ncid)
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        DEALLOCATE(tmpLon1D, tmpLat1D)
+
+    ELSE IF (ndims == 2) THEN
+        ! 2D coordinate variables = curvilinear grid
+        IsCurvilinear = .TRUE.
+
+        ! Get dimension sizes
+        ncRC = NF90_INQUIRE_DIMENSION(ncid, dimids(1), len=nLon)
+        ncRC = NF90_INQUIRE_DIMENSION(ncid, dimids(2), len=nLat)
+        IF (ncRC /= NF90_NOERR) THEN
+            ncRC = NF90_CLOSE(ncid)
+            IsCurvilinear = .FALSE.
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        ! Read 2D coordinate arrays
+        ALLOCATE(lonCenters2D(nLon, nLat), latCenters2D(nLon, nLat))
+        ALLOCATE(tmpLon2D(nLon, nLat), tmpLat2D(nLon, nLat))
+
+        ncRC = NF90_INQ_VARID(ncid, TRIM(lonVarName), varid)
+        ncRC = NF90_GET_VAR(ncid, varid, tmpLon2D)
+        IF (ncRC == NF90_NOERR) THEN
+            lonCenters2D = REAL(tmpLon2D, ESMF_KIND_R8)
+        ELSE
+            DEALLOCATE(tmpLon2D, tmpLat2D)
+            ncRC = NF90_CLOSE(ncid)
+            IsCurvilinear = .FALSE.
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        ncRC = NF90_INQ_VARID(ncid, TRIM(latVarName), varid)
+        ncRC = NF90_GET_VAR(ncid, varid, tmpLat2D)
+        IF (ncRC == NF90_NOERR) THEN
+            latCenters2D = REAL(tmpLat2D, ESMF_KIND_R8)
+        ELSE
+            DEALLOCATE(tmpLon2D, tmpLat2D)
+            ncRC = NF90_CLOSE(ncid)
+            IsCurvilinear = .FALSE.
+            CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+            RETURN
+        ENDIF
+
+        DEALLOCATE(tmpLon2D, tmpLat2D)
+
+    ELSE
+        ! Unsupported coordinate variable dimensionality
+        ncRC = NF90_CLOSE(ncid)
+        MSG = 'Unsupported coordinate variable dimensionality in: ' // TRIM(FileName)
+        IsCurvilinear = .FALSE.
+        CALL CreateDefaultGrid(nLon, nLat, lonCenters1D, latCenters1D, RC)
+        RETURN
+    ENDIF
+
+    ! Close NetCDF file
+    ncRC = NF90_CLOSE(ncid)
 
     ! Success
     RC = HCO_SUCCESS
+
+  CONTAINS
+
+    !=========================================================================
+    ! Helper routine to create default rectilinear grid
+    !=========================================================================
+    SUBROUTINE CreateDefaultGrid(nLon_def, nLat_def, lonCenters1D_def, latCenters1D_def, RC_def)
+      INTEGER, INTENT(OUT) :: nLon_def, nLat_def
+      REAL(ESMF_KIND_R8), ALLOCATABLE, INTENT(OUT) :: lonCenters1D_def(:), latCenters1D_def(:)
+      INTEGER, INTENT(INOUT) :: RC_def
+      INTEGER :: I_def, J_def
+
+      ! Set default global grid dimensions
+      nLon_def = 144  ! Default 2.5 degree resolution
+      nLat_def = 91   ! Default 2 degree resolution
+
+      ! Create default longitude coordinates (-180 to 177.5, 2.5 degree spacing)
+      ALLOCATE(lonCenters1D_def(nLon_def))
+      DO I_def = 1, nLon_def
+          lonCenters1D_def(I_def) = -180.0_ESMF_KIND_R8 + (I_def-1) * 2.5_ESMF_KIND_R8
+      ENDDO
+
+      ! Create default latitude coordinates (-90 to 90, 2 degree spacing)
+      ALLOCATE(latCenters1D_def(nLat_def))
+      DO J_def = 1, nLat_def
+          latCenters1D_def(J_def) = -90.0_ESMF_KIND_R8 + (J_def-1) * 2.0_ESMF_KIND_R8
+      ENDDO
+
+      RC_def = HCO_SUCCESS
+    END SUBROUTINE CreateDefaultGrid
 
   END SUBROUTINE ReadGridCoordinatesSimple
 !EOC

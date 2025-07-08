@@ -75,6 +75,7 @@ target_include_directories(HCO
 # Add ESMF I/O code conditionally when using ESMF/NUOPC
 if(BUILD_NUOPC_INTERFACE)
     target_sources(HCO PRIVATE
+        hco_esmf_regrid_mod.F90
         hcoio_read_esmf_mod.F90
         hcoio_write_esmf_mod.F90
     )
@@ -88,12 +89,9 @@ if(MAPL_ESMF)
     )
 endif()
 
-# Add ESMF include directories when building with ESMF
-if(BUILD_NUOPC_INTERFACE AND ESMF_FOUND)
-    target_include_directories(HCO
-        PUBLIC ${ESMF_INCLUDE_DIRS}
-    )
+# Add ESMF dependencies when building with ESMF
+if(BUILD_NUOPC_INTERFACE AND TARGET ESMF::esmf)
     target_link_libraries(HCO
-        PUBLIC ${ESMF_LIBRARIES}
+        PUBLIC ESMF::esmf
     )
 endif()
