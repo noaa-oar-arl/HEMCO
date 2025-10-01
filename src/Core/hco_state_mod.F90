@@ -83,7 +83,7 @@ MODULE HCO_State_Mod
      !%%%%% Aerosol quantities %%%%%
      INTEGER                     :: nDust      ! # of dust species
      LOGICAL                     :: MarinePOA  ! MUse marine organic aerosols?
-     TYPE(HcoMicroPhys), POINTER :: MicroPhys  ! Microphysics settings
+     TYPE(HcoMicroPhys), POINTER :: MicroPhys ! Microphysics settings
 
      !%%%%%  Run time options %%%%%
      TYPE(HcoOpt),       POINTER :: Options    ! HEMCO run options
@@ -112,7 +112,7 @@ MODULE HCO_State_Mod
      TYPE(ConfigObj), POINTER    :: Config => NULL()
 
      ! Pointer to beginning of collections linked list
-     TYPE(DiagnBundle),  POINTER :: Diagn  => NULL()
+     TYPE(DiagnBundle), POINTER :: Diagn  => NULL()
 
      !%%%%%  ESMF objects
 #if defined(ESMF_)
@@ -120,6 +120,22 @@ MODULE HCO_State_Mod
      TYPE(ESMF_State),    POINTER :: IMPORT
      TYPE(ESMF_State),    POINTER :: EXPORT
 #endif
+
+     !%%%%%  NEXUS integration objects
+#if defined(ESMF_)
+     ! NEXUS ESMF states for data exchange
+     TYPE(ESMF_State),    POINTER :: NXS_IMPORT => NULL()  ! NEXUS import state
+     TYPE(ESMF_State),    POINTER :: NXS_EXPORT => NULL()  ! NEXUS export state
+     
+     ! NEXUS configuration flags
+     LOGICAL                      :: do_NEXUS     = .FALSE. ! NEXUS integration enabled
+     LOGICAL                      :: do_NXS_Regrid = .FALSE. ! NEXUS regridding enabled
+     
+     ! NEXUS grid and regridding objects
+     TYPE(ESMF_Grid),     POINTER :: NXS_Grid => NULL()     ! NEXUS grid
+     TYPE(ESMF_RouteHandle)       :: NXS_RouteHandle        ! Route handle for regridding
+#endif
+
 #ifdef ADJOINT
      LOGICAL                      :: isAdjoint
 #endif
@@ -481,6 +497,15 @@ CONTAINS
     HcoState%GridComp => NULL()
     HcoState%IMPORT   => NULL()
     HcoState%EXPORT   => NULL()
+    
+    ! Initialize NEXUS ESMF pointers
+    HcoState%NXS_IMPORT => NULL()
+    HcoState%NXS_EXPORT => NULL()
+    HcoState%NXS_Grid   => NULL()
+    
+    ! Initialize NEXUS configuration flags
+    HcoState%do_NEXUS     = .FALSE.
+    HcoState%do_NXS_Regrid = .FALSE.
 #endif
 
     ! Read unit tolerance
@@ -603,6 +628,11 @@ CONTAINS
     HcoState%GridComp => NULL()
     HcoState%IMPORT   => NULL()
     HcoState%EXPORT   => NULL()
+    
+    ! Clean up NEXUS ESMF objects
+    HcoState%NXS_IMPORT => NULL()
+    HcoState%NXS_EXPORT => NULL()
+    HcoState%NXS_Grid   => NULL()
 #endif
 
   END SUBROUTINE HcoState_Final

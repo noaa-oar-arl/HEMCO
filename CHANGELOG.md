@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.0] - 2025-04-18
+### Added
+- Added option to enable `InvMEGAN` manual diagnostic output
+- Added supplemental guide documentation updates in the `geos-chem-shared-docs` submodule
+- Added `Lons` and `Lats` to `FileData` type to store bounds of mask files
+- Added definition of 0.125x0.15625 grid resolution
+
+### Changed
+- Use `USTAR` from meteorology instead of calculating from reference 10m wind in DustDead extension
+
+### Fixed
+- Fixed improper handling of mask files by removing code that overwrote	mask file years and months with lat/lon values and later hardcoded year and month values to -999
+
+## [3.10.3] - 2025-03-25
+### Added
+- Added commented out debug print options useful for debugging HEMCO in MPI models
+
+### Fixed
+- Fixed bug setting destination grid object sigma vector passed to MESSy for vertical regridding
+- Updated README to fix display of workflow badges
+
+## [3.10.2] - 2025-03-04
+### Added
+- Added `.zenodo.json` for auto-DOI generation upon version releases
+- Added GitHub Actions tests to build and test HEMCO on Windows, macOS, and Ubuntu automatically with each submitted PR
+
+### Changed
+- Bumped `jinja2` to version 3.1.5 in `docs/requirements.txt` to fix a security issue
+- Turned off map_a2a pole averaging when using CESM to avoid core-dependency in 2D emissions
+- Updated ReadTheDocs documentation for AWS CLI
+
+### Fixed
+- Updated several prints to limit to root thread to reduce log redundancy when using MPI
+
 ## [3.10.1] - 2025-01-10
 ### Added
 - Added optional LUN argument to ConfigInit to allow external models to pass LUN of existing log file

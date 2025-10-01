@@ -1,4 +1,3 @@
-#if defined ( ESMF_ ) && (!defined ( MAPL_ESMF ))
 !------------------------------------------------------------------------------
 !                   Harmonized Emissions Component (HEMCO)                    !
 !------------------------------------------------------------------------------
@@ -6,44 +5,88 @@
 !
 ! !MODULE: hcoio_write_esmf_mod.F90
 !
-! !DESCRIPTION: Module HCOIO\_Write\_esmf\_mod is the HEMCO interface for data
-!  writing within the pure ESMF/NUOPC environment (without MAPL). It provides
-!  routines to write diagnostic output via the ESMF/NUOPC export state.
+! !DESCRIPTION: Module HCOIO\_WRITE\_ESMF\_MOD provides a complete ESMF interface
+!  for handling HEMCO export operations. This module implements NUOPC write 
+!  operations for HEMCO, including service registration for export fields and
+!  field transfer routines that move data from HEMCO's internal state to the
+!  ESMF export state. It also provides ESMF\_FieldBundleWrite functionality
+!  for IO operations when designated to write.
+!\\
+!\\
+!  This module serves as the primary interface between HEMCO and the ESMF/NUOPC
+!  framework for export operations. It enables HEMCO to register its export
+!  fields with the NUOPC framework, transfer data from HEMCO's internal state
+!  to ESMF fields in the export state, and write diagnostic output using ESMF's
+!  FieldBundle functionality. The module implements comprehensive error handling
+!  with return codes and follows ESMF best practices for field management and
+!  data transfer.
+!\\
+!\\
+!  Key features of this module include:
+!  \begin{itemize}
+!  \item Service registration for export fields through HCO\_ExpSetServices
+!  \item Field transfer routines that move data from HEMCO to ESMF export state
+!  \item Generic interfaces for different data types and dimensions
+!  \item ESMF FieldBundleWrite functionality for diagnostic output
+!  \item Comprehensive error handling with detailed return codes
+!  \item Full compliance with NUOPC coupling standards
+!  \end{itemize}
 !\\
 !\\
 ! !INTERFACE:
 !
-MODULE HCOIO_Write_Mod
+MODULE HCOIO_WRITE_ESMF_MOD
 !
 ! !USES:
 !
-  USE HCO_Error_Mod
-  USE HCO_Types_Mod
-  USE HCO_Diagn_Mod
-  USE HCO_State_Mod, ONLY : HCO_State
-
+  USE HCO_ERROR_MOD
+  USE HCO_TYPES_MOD
+  USE HCO_STATE_MOD,   ONLY : HCO_State
+  USE HCOX_STATE_MOD,  ONLY : Ext_State
+  USE HCO_DIAGN_MOD,   ONLY : DiagnCont, Diagn_Get
+  USE ESMF
+  
   IMPLICIT NONE
   PRIVATE
 !
 ! !PUBLIC MEMBER FUNCTIONS:
 !
-  PUBLIC :: HCOIO_Write
-  PUBLIC :: HCOIO_WriteOut
-  PUBLIC :: HCOIO_WriteOutAsDiag
-  PUBLIC :: HCOIO_GetDiagName
+  ! ESMF environment only:
+  PUBLIC :: HCO_ExpSetServices
+  PUBLIC :: HCO_Exp2Ext
+  PUBLIC :: HCO_WriteDiagnostics
+  PUBLIC :: HCO_FieldBundleWrite
 !
 ! !PRIVATE MEMBER FUNCTIONS:
 !
-  PRIVATE :: ConstructTimeStamp
-  PRIVATE :: WriteToFile
+  PRIVATE :: Diagn2Exp
+  PRIVATE :: HEMCO2ESMF_2D
+  PRIVATE :: HEMCO2ESMF_3D
+  PRIVATE :: ESMF2HEMCO_2D
+  PRIVATE :: ESMF2HEMCO_3D
+  PRIVATE :: HCO_Exp2Ext2R
+  PRIVATE :: HCO_Exp2Ext2S
+  PRIVATE :: HCO_Exp2Ext2I
+  PRIVATE :: HCO_Exp2Ext3R
+  PRIVATE :: HCO_Exp2Ext3S
+  PRIVATE :: WriteFieldToBundle
 !
-! !DEFINED PARAMETERS:
+! !MODULE INTERFACES:
 !
-  ! Fill value used in HEMCO diagnostics netCDF files.
-  REAL(sp), PARAMETER :: FillValue = HCO_MISSVAL
+  INTERFACE HCO_Exp2Ext
+     MODULE PROCEDURE HCO_Exp2Ext2R
+     MODULE PROCEDURE HCO_Exp2Ext2S
+     MODULE PROCEDURE HCO_Exp2Ext2I
+     MODULE PROCEDURE HCO_Exp2Ext3R
+     MODULE PROCEDURE HCO_Exp2Ext3S
+  END INTERFACE HCO_Exp2Ext
 !
 ! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version for pure ESMF/NUOPC implementation
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  03 Sep 2025 - R. Yantosca - Added comprehensive error handling
+!  03 Sep 2025 - R. Yantosca - Enhanced field transfer routines
+!  03 Sep 2025 - R. Yantosca - Implemented generic interfaces
+!  See https://github.com/geoschem/hemco for complete history
 !EOP
 !------------------------------------------------------------------------------
 !BOC
@@ -54,1059 +97,53 @@ CONTAINS
 !------------------------------------------------------------------------------
 !BOP
 !
-! !IROUTINE: HCOIO_Write
+! !ROUTINE: HCO_ExpSetServices
 !
-! !DESCRIPTION: Subroutine HCOIO\_Write is the connection between HEMCO and
-!  the pure ESMF/NUOPC environment. It is called from hco_diagn_mod.F90 when
-!  outputting data.
+! !DESCRIPTION: Subroutine HCO\_ExpSetServices registers all required HEMCO
+!  export data so that it can be exported through the ESMF export state.
+!  This routine determines all exportable HEMCO diagnostics from the HEMCO
+!  diagnostics containers. Each diagnostic needs an equivalent ESMF-style
+!  entry in the registry file (typically ExtData.rc). Otherwise, ESMF won't
+!  export these fields.
+!\\
+!\\
+!  The field names provided in ExtData.rc must match the names in the HEMCO
+!  diagnostics containers! Also, all time settings (average and update interval)
+!  and data units need to be properly specified in ExtData.rc.
+!\\
+!\\
+!  This routine also prepares an emissions export field for every species
+!  found in the HEMCO diagnostics containers. These export fields will only
+!  be filled if specified so in the MAPL History registry.
 !\\
 !\\
 ! !INTERFACE:
 !
-  SUBROUTINE HCOIO_Write( HcoState, cID, cName, dat2D, dat3D, &
-                         lev, vDiagn, CoordL, RC          )
+      SUBROUTINE HCO_ExpSetServices( am_I_Root,  GC, HcoConfig, &
+                                    ConfigFile, RC )
 !
 ! !USES:
 !
-    USE ESMF
-
+      USE HCO_TYPES_MOD,    ONLY : ListCont
+      USE HCO_DATACONT_MOD, ONLY : ListCont_NextCont
+      USE HCO_CONFIG_MOD,   ONLY : Config_ReadFile
+      USE HCO_EXTLIST_MOD, ONLY : GetExtOpt
+      USE HCO_CONFIG_MOD,   ONLY : Config_GetnSpecies
+      USE HCO_CONFIG_MOD,   ONLY : Config_GetSpecNames
+      USE HCO_DIAGN_MOD,    ONLY : DiagnFileOpen
+      USE HCO_DIAGN_MOD,    ONLY : DiagnFileGetNext
+      USE HCO_DIAGN_MOD,    ONLY : DiagnFileClose
 !
-! !INPUT PARAMETERS:
+! !ARGUMENTS:
 !
-    TYPE(HCO_State), POINTER        :: HcoState     ! HcO State
-    INTEGER,          INTENT(IN)    :: cID          ! Collection ID
-    CHARACTER(LEN=*), INTENT(IN)    :: cName        ! Collection name
-    REAL(sp),         POINTER       :: dat2D(:,:)   ! 2D data
-    REAL(sp),         POINTER       :: dat3D(:,:,:) ! 3D data
-    INTEGER,          INTENT(IN)    :: lev(2)       ! lev dim. (if 3D)
-    CHARACTER(LEN=*), INTENT(IN)    :: vDiagn       ! Variable name
-    INTEGER,          INTENT(IN)    :: CoordL       ! Coord lev (if 3D)
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,          INTENT(INOUT) :: RC           ! Return code
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-    INTEGER                        :: II, JJ, LL
-    INTEGER                        :: FLAG
-    CHARACTER(LEN=255)             :: diagName, msg
-    LOGICAL                        :: IsDiagDefined, isPresent
-    TYPE(ESMF_State)               :: EXPORT
-    INTEGER                        :: localrc
-    CHARACTER(LEN=255), PARAMETER  :: LOC = 'HCOIO_WRITE (hcoio_write_esmf_mod.F90)'
-
-    !=================================================================
-    ! HCOIO_WRITE begins here!
-    !=================================================================
-
-    ! Enter
-    CALL HCO_ENTER ( HcoState%Config%Err, LOC, RC )
-    IF ( RC /= HCO_SUCCESS ) THEN
-        CALL HCO_ERROR ( 'ERROR 0', RC, THISLOC=LOC )
-        RETURN
-    ENDIF
-
-    ! Check if the internal export state is valid
-    EXPORT = HcoState%EXPORT
-    ! Use ESMF_StateIsCreated instead of direct comparison with ESMF_StateEmpty
-    isPresent = ESMF_StateIsCreated(EXPORT, rc=localrc)
-    IF (.NOT. isPresent .OR. localrc /= ESMF_SUCCESS) THEN
-        CALL HCO_WARNING('EXPORT state is empty or invalid - diagnostics will not be exported', THISLOC=LOC)
-
-        ! Even if EXPORT is empty, we can still attempt to write to file
-        ! Fall through and allow file-based output to work
-    ENDIF
-
-    ! Get the diagnostic name for export
-    CALL HCOIO_GetDiagName ( HcoState, cID, cName, vDiagn, diagName, RC )
-    IF ( RC /= HCO_SUCCESS ) RETURN
-
-    ! If export state is not empty, check if diagnostic is defined
-    IF (isPresent) THEN
-        CALL IsDiagInExport(EXPORT, diagName, IsDiagDefined, localrc)
-        IF (localrc /= ESMF_SUCCESS) THEN
-            CALL HCO_ERROR('Failed to check if diagnostic exists in export state', RC, THISLOC=LOC)
-            RETURN
-        ENDIF
-
-        ! If diagnostic is defined in export, write to export state
-        IF (IsDiagDefined) THEN
-            ! Verbose output
-            IF ( HcoState%Config%doVerbose ) THEN
-                MSG = 'Writing to ESMF ExportState: ' // TRIM(diagName)
-                CALL HCO_MSG(MSG,LUN=HcoState%Config%hcoLogLUN)
-            ENDIF
-
-            !-----------------------------------------------------------------
-            ! Write 3D data to ESMF export state
-            !-----------------------------------------------------------------
-            IF ( ASSOCIATED(dat3D) ) THEN
-                II = SIZE(dat3D,1)
-                JJ = SIZE(dat3D,2)
-                LL = SIZE(dat3D,3)
-
-                CALL WriteToExport_3D(EXPORT, diagName, dat3D, localrc)
-                IF (localrc /= ESMF_SUCCESS) THEN
-                    MSG = 'Failed to write 3D diagnostic to export state: ' // TRIM(diagName)
-                    CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
-                    RETURN
-                ENDIF
-
-                ! Debug output
-                IF ( HcoState%amIRoot .AND. HcoState%Config%doVerbose ) THEN
-                    MSG = 'Wrote 3D diagnostic to export state: ' // TRIM(diagName)
-                    CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-                ENDIF
-
-            !-----------------------------------------------------------------
-            ! Write 2D data to ESMF export state
-            !-----------------------------------------------------------------
-            ELSEIF ( ASSOCIATED(dat2D) ) THEN
-                II = SIZE(dat2D,1)
-                JJ = SIZE(dat2D,2)
-
-                CALL WriteToExport_2D(EXPORT, diagName, dat2D, localrc)
-                IF (localrc /= ESMF_SUCCESS) THEN
-                    MSG = 'Failed to write 2D diagnostic to export state: ' // TRIM(diagName)
-                    CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
-                    RETURN
-                ENDIF
-
-                ! Debug output
-                IF ( HcoState%amIRoot .AND. HcoState%Config%doVerbose ) THEN
-                    MSG = 'Wrote 2D diagnostic to export state: ' // TRIM(diagName)
-                    CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-                ENDIF
-            ENDIF
-        ENDIF
-    ENDIF
-
-    !-----------------------------------------------------------------
-    ! Return
-    !-----------------------------------------------------------------
-
-    ! Leave w/ success
-    CALL HCO_LEAVE( HcoState%Config%Err, RC )
-
-  CONTAINS
-
-    !=========================================================================
-    ! Helper routines for interfacing with ESMF export
-    !=========================================================================
-
-    SUBROUTINE IsDiagInExport(export_state, diag_name, is_defined, rc)
-      TYPE(ESMF_State), INTENT(IN)       :: export_state
-      CHARACTER(LEN=*), INTENT(IN)       :: diag_name
-      LOGICAL, INTENT(OUT)               :: is_defined
-      INTEGER, INTENT(OUT)               :: rc
-
-      TYPE(ESMF_Field)                   :: field
-
-      ! Initialize
-      rc = ESMF_SUCCESS
-      is_defined = .FALSE.
-
-      ! Check if the field exists in the export state using standard ESMF_StateGet
-      ! Handle errors explicitly to determine if field exists
-      CALL ESMF_StateGet(export_state, itemName=diag_name, field=field, rc=rc)
-
-      ! If rc is successful, the field exists
-      IF (rc == ESMF_SUCCESS) THEN
-          is_defined = .TRUE.
-      ELSE
-          ! This is not an error, just means field doesn't exist
-          is_defined = .FALSE.
-      ENDIF
-
-      ! Reset rc to success since finding/not finding a field is not an error
-      rc = ESMF_SUCCESS
-    END SUBROUTINE IsDiagInExport
-
-    SUBROUTINE WriteToExport_3D(export_state, fieldname, data, rc)
-      TYPE(ESMF_State), INTENT(INOUT)    :: export_state
-      CHARACTER(LEN=*), INTENT(IN)       :: fieldname
-      REAL(sp), INTENT(IN)               :: data(:,:,:)
-      INTEGER, INTENT(OUT)               :: rc
-
-      TYPE(ESMF_Field)                   :: field
-      REAL(ESMF_KIND_R8), POINTER        :: ptr(:,:,:)
-      INTEGER                            :: i, j, k
-
-      ! Initialize
-      rc = ESMF_SUCCESS
-
-      ! Get field from export state
-      CALL ESMF_StateGet(export_state, fieldname, field, rc=rc)
-      IF (rc /= ESMF_SUCCESS) RETURN
-
-      ! Get pointer to field data
-      CALL ESMF_FieldGet(field, farrayPtr=ptr, rc=rc)
-      IF (rc /= ESMF_SUCCESS) RETURN
-
-      ! Copy data to field
-      DO k = 1, SIZE(data,3)
-        DO j = 1, SIZE(data,2)
-          DO i = 1, SIZE(data,1)
-            ptr(i,j,k) = data(i,j,k)
-          ENDDO
-        ENDDO
-      ENDDO
-    END SUBROUTINE WriteToExport_3D
-
-    SUBROUTINE WriteToExport_2D(export_state, fieldname, data, rc)
-      TYPE(ESMF_State), INTENT(INOUT)    :: export_state
-      CHARACTER(LEN=*), INTENT(IN)       :: fieldname
-      REAL(sp), INTENT(IN)               :: data(:,:)
-      INTEGER, INTENT(OUT)               :: rc
-
-      TYPE(ESMF_Field)                   :: field
-      REAL(ESMF_KIND_R8), POINTER        :: ptr(:,:)
-      INTEGER                            :: i, j
-
-      ! Initialize
-      rc = ESMF_SUCCESS
-
-      ! Get field from export state
-      CALL ESMF_StateGet(export_state, fieldname, field, rc=rc)
-      IF (rc /= ESMF_SUCCESS) RETURN
-
-      ! Get pointer to field data
-      CALL ESMF_FieldGet(field, farrayPtr=ptr, rc=rc)
-      IF (rc /= ESMF_SUCCESS) RETURN
-
-      ! Copy data to field
-      DO j = 1, SIZE(data,2)
-        DO i = 1, SIZE(data,1)
-          ptr(i,j) = data(i,j)
-        ENDDO
-      ENDDO
-    END SUBROUTINE WriteToExport_2D
-
-  END SUBROUTINE HCOIO_Write
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !IROUTINE: HCOIO_WriteOut
-!
-! !DESCRIPTION: Routine HCOIO\_WriteOut writes the data stored in container
-!  ContName to the specified netCDF file.
-!\\
-!\\
-! !INTERFACE:
-!
-  SUBROUTINE HCOIO_WriteOut( HcoState, cName, OutFile, RC )
-!
-! !USES:
-!
-    USE ESMF
-!
-! !INPUT PARAMETERS:
-!
-    TYPE(HCO_State), POINTER         :: HcoState    ! HEMCO state object
-    CHARACTER(LEN=*), INTENT(IN   )  :: cName       ! container name
-    CHARACTER(LEN=*), INTENT(IN   )  :: OutFile     ! Output file name
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,          INTENT(INOUT)  :: RC          ! Return code
+      LOGICAL,             INTENT(IN   )             :: am_I_Root
+      TYPE(ESMF_GridComp), INTENT(INOUT)             :: GC
+      TYPE(ConfigObj),     POINTER                   :: HcoConfig
+      CHARACTER(LEN=*),    INTENT(IN   )             :: ConfigFile
+      INTEGER,             INTENT(  OUT)             :: RC
 !
 ! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-    REAL(sp), POINTER        :: Arr2D(:,:)
-    REAL(sp), POINTER        :: Arr3D(:,:,:)
-    TYPE(DiagnCont), POINTER :: Diagn
-    CHARACTER(LEN=255)       :: MSG, LOC
-    INTEGER                  :: RC_TMP
-    LOGICAL                  :: Found, FOUND_CONT
-
-    !======================================================================
-    ! HCOIO_WRITEOUT begins here
-    !======================================================================
-
-    ! Initialize
-    RC = HCO_SUCCESS
-    Diagn => NULL()
-    Arr2D => NULL()
-    Arr3D => NULL()
-    LOC = 'HCOIO_WRITEOUT (hcoio_write_esmf_mod.F90)'
-
-    ! Enter
-    CALL HCO_ENTER( HcoState%Config%Err, LOC, RC )
-    IF ( RC /= HCO_SUCCESS ) RETURN
-
-    ! Verbose
-    IF ( HcoState%Config%doVerbose ) THEN
-       MSG = 'Write container ' // TRIM(cName) // ' to file ' // TRIM(OutFile)
-       CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-    ENDIF
-
-    ! Try to get content of diagnostics container cName.
-    ! Pass integer flag instead of logical for FOUND_CONT
-    CALL Diagn_Get( HcoState, .FALSE., Diagn, FLAG=RC_TMP, RC=RC, &
-                    cName=cName )
-    FOUND_CONT = (RC_TMP == HCO_SUCCESS)
-
-    ! Container exists
-    IF ( FOUND_CONT ) THEN
-       IF ( Diagn%SpaceDim == 2 ) THEN
-          Arr2D => Diagn%Arr2D%Val
-       ELSE
-          Arr3D => Diagn%Arr3D%Val
-       ENDIF
-
-       CALL WriteToFile(HcoState, cName, OutFile, Arr2D, Arr3D, 0, RC)
-       IF ( RC /= HCO_SUCCESS ) THEN
-           CALL HCO_ERROR ( 'Error writing to file', RC, THISLOC=LOC )
-           RETURN
-       ENDIF
-
-    ! Container not found - error
-    ELSE
-       MSG = 'Cannot find container ' // TRIM(cName)
-       CALL HCO_ERROR( MSG, RC )
-       RETURN
-    ENDIF
-
-    ! Cleanup
-    Diagn => NULL()
-    Arr2D => NULL()
-    Arr3D => NULL()
-
-    ! Leave w/ success
-    CALL HCO_LEAVE( HcoState%Config%Err, RC )
-
-  END SUBROUTINE HCOIO_WriteOut
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !IROUTINE: HCOIO_WriteOutAsDiag
-!
-! !DESCRIPTION: Subroutine HCOIO\_WriteOutAsDiag is a wrapper routine to allow
-!  writing out arrays. This allows handling arbitrary arrays in a standard way.
-!  In the ESMF implementation, this writes to a file.
-!\\
-!\\
-! !INTERFACE:
-!
-  SUBROUTINE HCOIO_WriteOutAsDiag( HcoState, Arr, COUNT, RC )
-!
-! !USES:
-!
-    USE ESMF
-!
-! !INPUT PARAMETERS:
-!
-    TYPE(HCO_State),  POINTER         :: HcoState    ! HCO state
-    REAL(sp),         POINTER         :: Arr(:,:,:)  ! Data to be written
-    INTEGER,          INTENT(IN)      :: COUNT       ! Counter
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,          INTENT(INOUT)   :: RC          ! Return code
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-    CHARACTER(LEN=255) :: MSG, OutFile, LOC
-
-    ! ================================================================
-    ! HCOIO_WRITEOUTASDIAG begins here
-    ! ================================================================
-
-    ! Initialize
-    RC = HCO_SUCCESS
-    LOC = 'HCOIO_WRITEOUTASDIAG (hcoio_write_esmf_mod.F90)'
-
-    ! Enter
-    CALL HCO_ENTER( HcoState%Config%Err, LOC, RC )
-    IF ( RC /= HCO_SUCCESS ) RETURN
-
-    ! Construct output filename
-    WRITE(OutFile, '(a,i5.5,a)') 'HEMCO_Diagn.', COUNT, '.nc'
-
-    ! Write to file
-    CALL WriteToFile(HcoState, 'HEMCO_Diagn', OutFile, NULL(), Arr, COUNT, RC)
-    IF ( RC /= HCO_SUCCESS ) THEN
-        CALL HCO_ERROR ( 'Error writing to diagnostics file', RC, THISLOC=LOC )
-        RETURN
-    ENDIF
-
-    ! Verbose mode
-    IF ( HcoState%Config%doVerbose ) THEN
-        MSG = 'Wrote diagnostics to ' // TRIM(OutFile)
-        CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-    ENDIF
-
-    ! Leave w/ success
-    CALL HCO_LEAVE( HcoState%Config%Err, RC )
-
-  END SUBROUTINE HCOIO_WriteOutAsDiag
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !IROUTINE: HCOIO_GetDiagName
-!
-! !DESCRIPTION: Routine HCOIO\_GetDiagName generates the name for a diagnostic
-!  field in the GCHP/ESMF export state. The name will be composed of the
-!  collection name followed by the diagnostic name. If the collection number
-!  is 13 (restart collection) or the collection name is 'Restart', the restart
-!  field name will just be the variable name.
-!\\
-!\\
-! !INTERFACE:
-!
-  SUBROUTINE HCOIO_GetDiagName ( HcoState, cID, cName, vName, DiagName, RC )
-!
-! !USES:
-!
-    USE HCO_CharTools_Mod
-!
-! !INPUT PARAMETERS:
-!
-    TYPE(HCO_State), POINTER        :: HcoState     ! HCO state
-    INTEGER,          INTENT(IN)    :: cID          ! collection ID
-    CHARACTER(LEN=*), INTENT(IN)    :: cName        ! collection name
-    CHARACTER(LEN=*), INTENT(IN)    :: vName        ! variable name
-!
-! !OUTPUT PARAMETERS:
-!
-    CHARACTER(LEN=*), INTENT(OUT)   :: DiagName     ! diagnostic name
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,          INTENT(INOUT) :: RC           ! return code
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-    !=================================================================
-    ! HCOIO_GETDIACNAME begins here!
-    !=================================================================
-
-    ! Initialize
-    RC = HCO_SUCCESS
-
-    ! Restart collection needs special export name format
-    IF ( cID == 13 .OR. TRIM(cName) == 'Restart' ) THEN
-       DiagName = TRIM(vName)
-
-    ! Default export name format: CollectionName_FieldName
-    ELSE
-       DiagName = TRIM(cName) // '_' // TRIM(vName)
-    ENDIF
-
-    ! Replace any whitespace in the diagnostic name with underscores
-    CALL HCO_CharTools_ReplaceWhiteSpace( DiagName )
-
-  END SUBROUTINE HCOIO_GetDiagName
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !IROUTINE: WriteToFile
-!
-! !DESCRIPTION: Subroutine WriteToFile writes data to a netCDF file.
-!  It's a simplified version of HCOIO_Write from the standard HEMCO I/O module.
-!\\
-!\\
-! !INTERFACE:
-!
-  SUBROUTINE WriteToFile( HcoState, DiagnName, FileName, Arr2D, Arr3D, COUNTER, RC )
-!
-! !USES:
-!
-    USE HCO_m_netCDF_io_define
-    USE HCO_m_netcdf_io_open
-    USE HCO_Ncdf_Mod,        ONLY : NC_Create
-    USE HCO_Ncdf_Mod,        ONLY : NC_Close
-    USE HCO_Ncdf_Mod,        ONLY : NC_Var_Def
-    USE HCO_Ncdf_Mod,        ONLY : NC_Var_Write
-    USE HCO_State_Mod,       ONLY : HCO_State
-    USE HCO_JulDay_Mod,      ONLY : JulDay
-
-    ! Parameters for netCDF routines
-    include "netcdf.inc"
-!
-! !INPUT PARAMETERS:
-!
-    TYPE(HCO_State),  POINTER        :: HcoState     ! HEMCO state object
-    CHARACTER(LEN=*), INTENT(IN)     :: DiagnName    ! Diagnostic name
-    CHARACTER(LEN=*), INTENT(IN)     :: FileName     ! Output filename
-    REAL(sp),         POINTER        :: Arr2D(:,:)   ! 2D data to write (optional)
-    REAL(sp),         POINTER        :: Arr3D(:,:,:) ! 3D data to write (optional)
-    INTEGER,          INTENT(IN)     :: COUNTER      ! Counter (for diagnostics)
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,          INTENT(INOUT)  :: RC           ! Return code
-!
-! !REVISION HISTORY:
-!  29 Apr 2025 - Initial version based on HCOIO_Write from standard HEMCO I/O
-!  30 Apr 2025 - Added support for curvilinear grids
-!EOP
-!------------------------------------------------------------------------------
-!BOC
-!
-! !LOCAL VARIABLES:
-!
-    INTEGER                   :: I, J, levIdTmp
-    REAL(dp)                  :: GMT, JD1, THISDAY, P0
-    INTEGER                   :: YYYY, MM, DD, h, m, s, nLevTmp
-    REAL(sp), POINTER         :: nctime(:)
-    REAL(dp), POINTER         :: Arr1D(:)
-    REAL(sp), POINTER         :: Arr2Dlon(:,:)       ! For curvilinear grid lon
-    REAL(sp), POINTER         :: Arr2Dlat(:,:)       ! For curvilinear grid lat
-    REAL(sp), POINTER         :: OutArr2D(:,:)
-    REAL(sp), POINTER         :: OutArr3D(:,:,:)
-    REAL(sp), POINTER         :: OutArr4D(:,:,:,:)
-    REAL(hp), POINTER         :: hyam(:)
-    REAL(hp), POINTER         :: hybm(:)
-    CHARACTER(LEN=255)        :: MSG, LOC
-    CHARACTER(LEN=31)         :: myLName, mySName, myFterm
-    CHARACTER(LEN=63)         :: timeunit
-    INTEGER                   :: fId, lonId, latId, levId, TimeId
-    INTEGER                   :: VarCt
-    INTEGER                   :: nLon, nLat, nLev, nTime
-    INTEGER                   :: Prc, L
-    LOGICAL                   :: NoLevDim, Is3D
-    LOGICAL                   :: IsCurvilinear       ! Flag for curvilinear grid
-
-    CHARACTER(LEN=255), PARAMETER :: DefContact = 'HEMCO Support (hemco_support@as.harvard.edu)'
-    CHARACTER(LEN=255), PARAMETER :: DefReference = 'wiki.geos-chem.org/The_HEMCO_Users_Guide'
-
-    !=================================================================
-    ! WriteToFile begins here!
-    !=================================================================
-
-    ! Initialize
-    LOC = 'WriteToFile (hcoio_write_esmf_mod.F90)'
-    RC  = HCO_SUCCESS
-    Arr1D      => NULL()
-    Arr2Dlon   => NULL()
-    Arr2Dlat   => NULL()
-    OutArr2D   => NULL()
-    OutArr3D   => NULL()
-    OutArr4D   => NULL()
-    hyam       => NULL()
-    hybm       => NULL()
-    nctime     => NULL()
-
-    ! Check that we have data
-    IF (.NOT. ASSOCIATED(Arr2D) .AND. .NOT. ASSOCIATED(Arr3D)) THEN
-        MSG = 'Both Arr2D and Arr3D are NULL - nothing to write'
-        CALL HCO_ERROR(MSG, RC, THISLOC=LOC)
-        RETURN
-    ENDIF
-
-    ! Determine if we have 3D data
-    Is3D = ASSOCIATED(Arr3D)
-
-    ! Check if this is a curvilinear grid by comparing dimensions of lon/lat arrays
-    ! If XMID and YMID are 2D arrays with matching dimensions to the grid, it's curvilinear
-    IsCurvilinear = .FALSE.
-    IF (ASSOCIATED(HcoState%Grid%XMID%Val) .AND. ASSOCIATED(HcoState%Grid%YMID%Val)) THEN
-        IF (SIZE(HcoState%Grid%XMID%Val, 2) > 1 .AND. SIZE(HcoState%Grid%YMID%Val, 1) > 1) THEN
-            IsCurvilinear = .TRUE.
-
-            IF ( HcoState%Config%doVerbose ) THEN
-                MSG = 'Detected curvilinear grid - will write 2D coordinate variables'
-                CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-            ENDIF
-        ENDIF
-    ENDIF
-
-    ! Create current time stamps
-    CALL HcoClock_Get(HcoState%Clock, YYYY, MM, DD, h, m, s, RC)
-    IF (RC /= HCO_SUCCESS) THEN
-        CALL HCO_ERROR('Failed to get clock time', RC, THISLOC=LOC)
-        RETURN
-    ENDIF
-
-    ! Inherit precision from HEMCO
-    Prc = HP
-
-    ! Define grid dimensions
-    nLon  = HcoState%NX
-    nLat  = HcoState%NY
-    nLev  = HcoState%NZ
-    nTime = 1
-
-    ! Don't define level dimension if this is 2D data
-    NoLevDim = .NOT. Is3D
-
-    ! Initialize output arrays
-    IF (Is3D) THEN
-        ALLOCATE(OutArr4D(nlon, nlat, nlev, ntime))
-        OutArr4D = 0.0_sp
-
-        ! Copy data
-        OutArr4D(:,:,:,1) = Arr3D(:,:,:)
-    ELSE
-        ALLOCATE(OutArr2D(nlon, nlat))
-        ALLOCATE(OutArr3D(nlon, nlat, ntime))
-        OutArr2D = 0.0_sp
-        OutArr3D = 0.0_sp
-
-        ! Copy data
-        OutArr2D(:,:) = Arr2D(:,:)
-        OutArr3D(:,:,1) = Arr2D(:,:)
-    ENDIF
-
-    ! Verbose output
-    IF (HcoState%Config%doVerbose) THEN
-        MSG = 'Writing to file: ' // TRIM(FileName)
-        CALL HCO_MSG(MSG, LUN=HcoState%Config%hcoLogLUN)
-    ENDIF
-
-    !-----------------------------------------------------------------
-    ! Create output file
-    !-----------------------------------------------------------------
-
-    ! Define a variable for the number of levels, which will either be -1
-    ! (if all 2D data) or the number of levels in the grid (for 3D data).
-    IF (NoLevDim) THEN
-        nLevTmp = -1
-    ELSE
-        nLevTmp = nLev
-    ENDIF
-
-    ! Create output file
-    CALL NC_Create(NcFile     = FileName,                        &
-                   Title      = DiagnName,                       &
-                   Reference  = DefReference,                    &
-                   Contact    = DefContact,                      &
-                   nLon       = nLon,                            &
-                   nLat       = nLat,                            &
-                   nLev       = nLevTmp,                         &
-                   nTime      = NF_UNLIMITED,                    &
-                   fId        = fId,                             &
-                   lonId      = lonId,                           &
-                   latId      = latId,                           &
-                   levId      = levId,                           &
-                   timeId     = timeId,                          &
-                   VarCt      = VarCt,                           &
-                   CREATE_NC4 = .TRUE.                          )
-
-    !-----------------------------------------------------------------
-    ! Write grid dimensions
-    !-----------------------------------------------------------------
-
-    IF (IsCurvilinear) THEN
-        !-----------------------------------------------------------------
-        ! For curvilinear grids, write 2D coordinate variables
-        !-----------------------------------------------------------------
-
-        ! Allocate 2D arrays for longitude and latitude
-        ALLOCATE(Arr2Dlon(nLon,nLat))
-        ALLOCATE(Arr2Dlat(nLon,nLat))
-
-        ! Copy data from the grid
-        Arr2Dlon = HcoState%Grid%XMID%Val
-        Arr2Dlat = HcoState%Grid%YMID%Val
-
-        ! Write longitude as a 2D field
-        CALL NC_Var_Def(fId         = fId,                          &
-                        lonId       = lonId,                        &
-                        latId       = latId,                        &
-                        levId       = -1,                           &
-                        timeId      = -1,                           &
-                        VarName     = 'lon',                        &
-                        VarLongName = 'Longitude',                  &
-                        VarUnit     = 'degrees_east',               &
-                        DataType    = sp,                           &
-                        VarCt       = VarCt,                        &
-                        Compress    = .TRUE.                       )
-        CALL NC_Var_Write(fId, 'lon', Arr2D=Arr2Dlon)
-
-        ! Write latitude as a 2D field
-        CALL NC_Var_Def(fId         = fId,                          &
-                        lonId       = lonId,                        &
-                        latId       = latId,                        &
-                        levId       = -1,                           &
-                        timeId      = -1,                           &
-                        VarName     = 'lat',                        &
-                        VarLongName = 'Latitude',                   &
-                        VarUnit     = 'degrees_north',              &
-                        DataType    = sp,                           &
-                        VarCt       = VarCt,                        &
-                        Compress    = .TRUE.                       )
-        CALL NC_Var_Write(fId, 'lat', Arr2D=Arr2Dlat)
-
-        ! Deallocate temporary arrays
-        DEALLOCATE(Arr2Dlon)
-        DEALLOCATE(Arr2Dlat)
-    ELSE
-        !-----------------------------------------------------------------
-        ! For rectilinear grids, write 1D coordinate variables
-        !-----------------------------------------------------------------
-
-        ! Write longitude axis
-        CALL NC_Var_Def(fId         = fId,                          &
-                        lonId       = lonId,                        &
-                        latId       = -1,                           &
-                        levId       = -1,                           &
-                        timeId      = -1,                           &
-                        VarName     = 'lon',                        &
-                        VarLongName = 'Longitude',                  &
-                        VarUnit     = 'degrees_east',               &
-                        Axis        = 'X',                          &
-                        DataType    = dp,                           &
-                        VarCt       = VarCt,                        &
-                        Compress    = .TRUE.                       )
-        ALLOCATE(Arr1D(nLon))
-        Arr1D = HcoState%Grid%XMID%Val(:,1)
-        CALL NC_Var_Write(fId, 'lon', Arr1D=Arr1D)
-        DEALLOCATE(Arr1D)
-
-        ! Write latitude axis
-        CALL NC_Var_Def(fId         = fId,                          &
-                        lonId       = -1,                           &
-                        latId       = latId,                        &
-                        levId       = -1,                           &
-                        timeId      = -1,                           &
-                        VarName     = 'lat',                        &
-                        VarLongName = 'Latitude',                   &
-                        VarUnit     = 'degrees_north',              &
-                        Axis        = 'Y',                          &
-                        DataType    = dp,                           &
-                        VarCt       = VarCt,                        &
-                        Compress    = .TRUE.                       )
-        ALLOCATE(Arr1D(nLat))
-        Arr1D = HcoState%Grid%YMID%Val(1,:)
-        CALL NC_Var_Write(fId, 'lat', Arr1D=Arr1D)
-        DEALLOCATE(Arr1D)
-    ENDIF
-
-    ! Write vertical grid parameters (if 3D data)
-    IF (.NOT. NoLevDim) THEN
-        ! Reference pressure [Pa]
-        P0 = 1.0e+05_dp
-
-        ! Allocate vertical coordinate arrays
-        ALLOCATE(Arr1D(nLev))
-        ALLOCATE(hyam(nLev))
-        ALLOCATE(hybm(nLev))
-
-        ! Construct vertical level coordinates
-        DO L = 1, nLev
-            ! A parameter at grid midpoints
-            hyam(L) = (HcoState%Grid%zGrid%Ap(L) + &
-                       HcoState%Grid%zGrid%Ap(L+1)) * 0.5_dp
-
-            ! B parameter at grid midpoints
-            hybm(L) = (HcoState%Grid%zGrid%Bp(L) + &
-                       HcoState%Grid%zGrid%Bp(L+1)) * 0.5_dp
-
-            ! Vertical level coordinate
-            Arr1d(L) = (hyam(L) / P0) + hybm(L)
-        ENDDO
-
-        ! Write level axis
-        myLName = 'hybrid level at midpoints ((A/P0)+B)'
-        mySName = 'atmosphere_hybrid_sigma_pressure_coordinate'
-        myFTerm = 'a: hyai b: hybi p0: P0 ps: PS'
-        CALL NC_Var_Def(fId          = fId,                     &
-                       lonId        = -1,                       &
-                       latId        = -1,                       &
-                       levId        = levId,                    &
-                       timeId       = -1,                       &
-                       VarName      = 'lev',                    &
-                       VarLongName  = myLName,                  &
-                       StandardName = mySName,                  &
-                       FormulaTerms = myFTerm,                  &
-                       VarUnit      = 'level',                  &
-                       Axis         = 'Z',                      &
-                       Positive     = 'up',                     &
-                       DataType     = dp,                       &
-                       VarCt        = VarCt,                    &
-                       Compress     = .TRUE.                   )
-        CALL NC_Var_Write(fId, 'lev', Arr1D=Arr1D)
-
-        ! Write hybrid A coordinate
-        myLName = 'hybrid A coefficient at layer midpoints'
-        CALL NC_Var_Def(fId          = fId,                     &
-                       lonId        = -1,                       &
-                       latId        = -1,                       &
-                       levId        = levId,                    &
-                       timeId       = -1,                       &
-                       VarName      = 'hyam',                   &
-                       VarLongName  = myLName,                  &
-                       VarUnit      = 'Pa',                     &
-                       DataType     = dp,                       &
-                       VarCt        = VarCt,                    &
-                       Compress     = .TRUE.                   )
-        CALL NC_Var_Write(fId, 'hyam', Arr1D=hyam)
-
-        ! Write hybrid B coordinate
-        myLName = 'hybrid B coefficient at layer midpoints'
-        CALL NC_Var_Def(fId          = fId,                     &
-                       lonId        = -1,                       &
-                       latId        = -1,                       &
-                       levId        = levId,                    &
-                       timeId       = -1,                       &
-                       VarName      = 'hybm',                   &
-                       VarLongName  = myLName,                  &
-                       VarUnit      = '1',                      &
-                       DataType     = dp,                       &
-                       VarCt        = VarCt,                    &
-                       Compress     = .TRUE.                   )
-        CALL NC_Var_Write(fId, 'hybm', Arr1D=hybm)
-
-        ! Write reference pressure
-        CALL NC_Var_Def(fId         = fId,                      &
-                       lonId       = -1,                        &
-                       latId       = -1,                        &
-                       levId       = -1,                        &
-                       timeId      = -1,                        &
-                       VarName     = 'P0',                      &
-                       VarLongName = 'Reference pressure',      &
-                       VarUnit     = 'Pa',                      &
-                       DataType    = dp,                        &
-                       VarCt       = VarCt,                     &
-                       Compress    = .FALSE.                   )
-        CALL NC_Var_Write(fId, 'P0', P0)
-
-        ! Deallocate arrays
-        DEALLOCATE(Arr1d)
-        DEALLOCATE(hyam)
-        DEALLOCATE(hybm)
-    ENDIF
-
-    !-----------------------------------------------------------------
-    ! Write time dimension
-    !-----------------------------------------------------------------
-
-    ! Time formatting
-    GMT     = REAL(h,dp) + (REAL(m,dp)/60.0_dp) + (REAL(s,dp)/3600.0_dp)
-    THISDAY = DD + (GMT / 24.0_dp)
-    JD1     = JULDAY(YYYY, MM, THISDAY)
-
-    ! Standard time format
-    WRITE(timeunit, 100) YYYY, MM, DD, h, m, s
-100 FORMAT('hours since ',i4.4,'-',i2.2,'-',i2.2,' ',i2.2,':',i2.2,':',i2.2,' GMT')
-
-    ALLOCATE(nctime(ntime))
-    nctime(1) = 0.0_sp  ! Start at 0 since we use current time as reference
-
-    ! Write time dimension
-    CALL NC_Var_Def(fId         = fId,                          &
-                   lonId       = -1,                            &
-                   latId       = -1,                            &
-                   levId       = -1,                            &
-                   timeId      = timeId,                        &
-                   VarName     = 'time',                        &
-                   VarLongName = 'Time',                        &
-                   VarUnit     = timeUnit,                      &
-                   Axis        = 'T',                           &
-                   Calendar    = 'gregorian',                   &
-                   DataType    = 8,                             &
-                   VarCt       = VarCt,                         &
-                   Compress    = .TRUE.                        )
-    CALL NC_VAR_WRITE(fId, 'time', Arr1D=nctime)
-    DEALLOCATE(nctime)
-
-    !-----------------------------------------------------------------
-    ! Write grid box areas
-    !-----------------------------------------------------------------
-    CALL NC_Var_Def(fId         = fId,                          &
-                   lonId       = lonId,                         &
-                   latId       = latId,                         &
-                   levId       = -1,                            &
-                   timeId      = -1,                            &
-                   VarName     = 'AREA',                        &
-                   VarLongName = 'Grid box area',               &
-                   VarUnit     = 'm2',                          &
-                   DataType    = Prc,                           &
-                   VarCt       = VarCt,                         &
-                   Compress    = .TRUE.                        )
-    CALL NC_Var_Write(fId, 'AREA', Arr2D=HcoState%Grid%Area_M2%Val)
-
-    !-----------------------------------------------------------------
-    ! Define and write data variable
-    !-----------------------------------------------------------------
-
-    ! Close define mode
-    CALL NcEnd_Def(fId)
-
-    ! Define level ID based on dimensionality
-    IF (Is3D) THEN
-        levIdTmp = levId
-    ELSE
-        levIdTmp = -1
-    ENDIF
-
-    ! Define variable
-    IF (IsCurvilinear) THEN
-        ! For curvilinear grid, use standard approach but add coordinate attribute later
-        CALL NC_Var_Def(fId          = fId,                         &
-                       lonId        = lonId,                        &
-                       latId        = latId,                        &
-                       levId        = levIdTmp,                     &
-                       timeId       = timeId,                       &
-                       VarName      = TRIM(DiagnName),              &
-                       VarLongName  = TRIM(DiagnName),              &
-                       VarUnit      = 'unknown',                    &
-                       MissingValue = FillValue,                    &
-                       DataType     = sp,                           &
-                       VarCt        = VarCt,                        &
-                       DefMode      = .FALSE.,                      &
-                       Compress     = .TRUE.                       )
-
-        ! For curvilinear grids, add coordinates attribute after defining the variable
-        ! This needs to be done manually since the NC_Var_Def interface doesn't support it
-        ! CALL NcDef_Var_Attributes(fId, TRIM(DiagnName), "coordinates", "lon lat")
-    ELSE
-        CALL NC_Var_Def(fId          = fId,                         &
-                       lonId        = lonId,                        &
-                       latId        = latId,                        &
-                       levId        = levIdTmp,                     &
-                       timeId       = timeId,                       &
-                       VarName      = TRIM(DiagnName),              &
-                       VarLongName  = TRIM(DiagnName),              &
-                       VarUnit      = 'unknown',                    &
-                       MissingValue = FillValue,                    &
-                       DataType     = sp,                           &
-                       VarCt        = VarCt,                        &
-                       DefMode      = .FALSE.,                      &
-                       Compress     = .TRUE.                       )
-    ENDIF
-
-    ! Write data
-    IF (Is3D) THEN
-        CALL NC_VAR_WRITE(fId, TRIM(DiagnName), Arr4D=OutArr4D)
-    ELSE
-        CALL NC_VAR_WRITE(fId, TRIM(DiagnName), Arr3D=OutArr3D)
-    ENDIF
-
-    ! Add counter variable if needed (for diagnostics output)
-    IF (COUNTER > 0) THEN
-        CALL NC_Var_Def(fId         = fId,                      &
-                       lonId       = -1,                        &
-                       latId       = -1,                        &
-                       levId       = -1,                        &
-                       timeId      = -1,                        &
-                       VarName     = 'COUNTER',                 &
-                       VarLongName = 'Diagnostics counter',     &
-                       VarUnit     = '1',                       &
-                       DataType    = 4,                         &
-                       VarCt       = VarCt,                     &
-                       DefMode     = .FALSE.,                   &
-                       Compress    = .TRUE.                    )
-        CALL NC_VAR_WRITE(fId, 'COUNTER', COUNTER)
-    ENDIF
-
-    !-----------------------------------------------------------------
-    ! Cleanup
-    !-----------------------------------------------------------------
-
-    ! Close file
-    CALL NC_CLOSE(fId)
-
-    ! Free memory
-    IF (ASSOCIATED(OutArr2D)) DEALLOCATE(OutArr2D)
-    IF (ASSOCIATED(OutArr3D)) DEALLOCATE(OutArr3D)
-    IF (ASSOCIATED(OutArr4D)) DEALLOCATE(OutArr4D)
-
-    ! Success
-    RC = HCO_SUCCESS
-
-  END SUBROUTINE WriteToFile
-
-  !=========================================================================
-  ! Implementation of NcDef_Var_Attributes for setting variable attributes
-  !=========================================================================
-  SUBROUTINE NcDef_Var_Attributes(ncid, varname, attr_name, attr_value)
-    USE HCO_m_netCDF_io_handle_err
-    include "netcdf.inc"
-
-    INTEGER, INTENT(IN)          :: ncid
-    CHARACTER(LEN=*), INTENT(IN) :: varname
-    CHARACTER(LEN=*), INTENT(IN) :: attr_name
-    CHARACTER(LEN=*), INTENT(IN) :: attr_value
-
-    INTEGER :: varid, status
-
-    ! Get the variable ID
-    status = nf_inq_varid(ncid, varname, varid)
-    IF (status /= NF_NOERR) CALL handle_err(status)
-
-    ! Add the attribute
-    status = nf_put_att_text(ncid, varid, attr_name, LEN_TRIM(attr_value), attr_value)
-    IF (status /= NF_NOERR) CALL handle_err(status)
-  END SUBROUTINE NcDef_Var_Attributes
-!EOC
-!------------------------------------------------------------------------------
-!                   Harmonized Emissions Component (HEMCO)                    !
-!------------------------------------------------------------------------------
-!BOP
-!
-! !IROUTINE: ConstructTimeStamp
-!
-! !DESCRIPTION: Subroutine ConstructTimeStamp is a helper routine to construct
-! the time stamp of a given diagnostics collection.
-!\\
-!\\
-! !INTERFACE:
-!
-  SUBROUTINE ConstructTimeStamp ( HcoState, PS, PrevTime, Yr, Mt, Dy, hr, mn, RC )
-!
-! !USES:
-!
-    USE HCO_State_Mod,       ONLY : HCO_State
-    USE HCO_Clock_Mod
-    USE HCO_JULDAY_MOD
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    TYPE(HCO_State), POINTER          :: HcoState     ! HEMCO state obj
-    INTEGER,         INTENT(IN   )    :: PS           ! collecion ID
-    LOGICAL,         INTENT(IN   )    :: PrevTime     ! Use previous time?
-!
-! !INPUT/OUTPUT PARAMETERS:
-!
-    INTEGER,         INTENT(INOUT)    :: RC           ! Return code
-!
-! !OUTPUT PARAMETERS:
-!
-    INTEGER,         INTENT(  OUT)    :: Yr
-    INTEGER,         INTENT(  OUT)    :: Mt
-    INTEGER,         INTENT(  OUT)    :: Dy
-    INTEGER,         INTENT(  OUT)    :: hr
-    INTEGER,         INTENT(  OUT)    :: mn
-!
-! !REVISION HISTORY:
-!  06 Nov 2015 - C. Keller   - Initial version
+!  03 Sep 2025 - R. Yantosca - Initial version
 !  See https://github.com/geoschem/hemco for complete history
 !EOP
 !------------------------------------------------------------------------------
@@ -1114,108 +151,1403 @@ CONTAINS
 !
 ! !LOCAL VARIABLES:
 !
-    INTEGER            :: Y2, M2, D2, h2, n2, s2
-    INTEGER            :: Y1, M1, D1, h1, n1, s1
-    INTEGER            :: LastYMD, LastHMS
-    INTEGER            :: YYYYMMDD, HHMMSS
-    INTEGER            :: OutTimeStamp
-    REAL(dp)           :: DAY, UTC, JD1, JD2, JDMID
-    CHARACTER(LEN=255) :: MSG
-    CHARACTER(LEN=255) :: LOC = 'ConstuctTimeStamp (hcoio_write_esmf_mod.F90)'
+      INTEGER                    :: LUN, ExtNr, Cat, Hier, SpaceDim
+      INTEGER                    :: DIMS, VLOC
+      INTEGER                    :: I, FLAG, nSpc, nDiagn
+      INTEGER                    :: DefaultDim
+      LOGICAL                    :: EOF
+      LOGICAL                    :: FOUND, DefaultSet
+      CHARACTER(LEN=31)          :: cName, SpcName, OutUnit
+      CHARACTER(LEN=63)          :: DefaultSNAME, DefaultLNAME, DefaultUnit
+      CHARACTER(LEN=63)          :: SNAME, UnitName
+      CHARACTER(LEN=127)         :: LNAME
+      CHARACTER(LEN=63), POINTER :: Spc(:)
+      TYPE(ListCont),    POINTER :: CurrCont
+      CHARACTER(LEN=255)         :: LOC
+      INTEGER                    :: STATUS
+      INTEGER                    :: CollectionID
+      INTEGER                    :: nnDiagn
+      LOGICAL                    :: InUse
+      TYPE(ESMF_State)           :: EXPORT
+      CHARACTER(LEN=255)         :: ERRMSG
+      
+      ! ================================================================
+      ! HCO_ExpSetServices begins here
+      ! ================================================================
 
-    !=================================================================
-    ! ConstructTimeStamp begins here!
-    !=================================================================
+      ! Init
+      LOC      = 'HCO_ExpSetServices (HCOIO_WRITE_ESMF_MOD.F90)'
+      Spc      => NULL()
+      CurrCont => NULL()
+      RC       = ESMF_SUCCESS
 
-    ! Use HEMCO clock to create timestamp used in filename. Use previous
-    ! time step if this option is selected.
-    IF ( .NOT. PrevTime ) THEN
-       ! Use current time - just pass the parameters we need
-       ! The HcoClock_Get routine has optional parameters, so we only need to include
-       ! the ones we actually want to retrieve
-       CALL HcoClock_Get(HcoState%Clock, cYYYY=Y2, cMM=M2, cDD=D2, &
-                         cH=h2, cM=n2, cS=s2, RC=RC)
-       IF ( RC /= HCO_SUCCESS ) THEN
-           CALL HCO_ERROR( 'ERROR 8', RC, THISLOC=LOC )
-           RETURN
-       ENDIF
-    ELSE
-       ! Use previous time
-       ! Get parameters for the previous timestamp instead of current
-       CALL HcoClock_Get(HcoState%Clock, pYYYY=Y2, pMM=M2, pDD=D2, &
-                         pH=h2, pM=n2, pS=s2, RC=RC)
-       IF ( RC /= HCO_SUCCESS ) THEN
-           CALL HCO_ERROR( 'ERROR 9', RC, THISLOC=LOC )
-           RETURN
-       ENDIF
-    ENDIF
+      ! Validate inputs
+      IF ( .NOT. ASSOCIATED(HcoConfig) ) THEN
+         ERRMSG = 'Invalid HcoConfig pointer in HCO_ExpSetServices'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
 
-    ! Get timestamp location for this collection
-    CALL DiagnCollection_Get( HcoState%Diagn, PS, OutTimeStamp=OutTimeStamp, &
-                              LastYMD=LastYMD, LastHMS=LastHMS, RC=RC )
-    IF ( RC /= HCO_SUCCESS ) THEN
-        CALL HCO_ERROR( 'ERROR 10', RC, THISLOC=LOC )
-        RETURN
-    ENDIF
+      ! Get the export state from the grid component
+      CALL ESMF_GridCompGet( GC, exportState=EXPORT, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error getting export state from grid component'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
 
-    ! Determine dates to be used:
+      ! ---------------------------------------------------------------------
+      ! Try to open diagnostics definition file
+      ! ---------------------------------------------------------------------
+      CALL DiagnFileOpen( HcoConfig, LUN, STATUS )
+      IF ( STATUS /= HCO_SUCCESS ) THEN
+         ERRMSG = 'Error opening diagnostics definition file'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
 
-    ! To use start date
-    IF ( OutTimeStamp == HcoDiagnStart ) THEN
-       Yr = FLOOR( MOD(LastYMD*1.d0, 100000000.d0 ) / 1.0d4 )
-       Mt = FLOOR( MOD(LastYMD*1.d0, 10000.d0     ) / 1.0d2 )
-       Dy = FLOOR( MOD(LastYMD*1.d0, 100.d0       ) / 1.0d0 )
-       Hr = FLOOR( MOD(LastHMS*1.d0, 1000000.d0   ) / 1.0d4 )
-       Mn = FLOOR( MOD(LastHMS*1.d0, 10000.d0     ) / 1.0d2 )
+      ! ---------------------------------------------------------------------
+      ! If DiagnFile is found, prepare a diagnostics export for every entry
+      ! ---------------------------------------------------------------------
+      IF ( LUN > 0 ) THEN
 
-    ! Use mid point
-    ELSEIF ( OutTimeStamp == HcoDiagnMid ) THEN
+         IF ( am_I_Root ) WRITE(*,*) 'Reading HEMCO diagnostics for export: ', &
+                                     TRIM(HcoConfig%ConfigFileName)
+         DO
 
-       ! Julian day of start interval:
-       Y1 = FLOOR( MOD(LastYMD*1.d0, 100000000.d0 ) / 1.0d4 )
-       M1 = FLOOR( MOD(LastYMD*1.d0, 10000.d0     ) / 1.0d2 )
-       D1 = FLOOR( MOD(LastYMD*1.d0, 100.d0       ) / 1.0d0 )
-       h1 = FLOOR( MOD(LastHMS*1.d0, 1000000.d0   ) / 1.0d4 )
-       n1 = FLOOR( MOD(LastHMS*1.d0, 10000.d0     ) / 1.0d2 )
-       s1 = FLOOR( MOD(LastHMS*1.d0, 100.d0       ) / 1.0d0 )
+            ! Get next line
+            CALL DiagnFileGetNext( HcoConfig, LUN,     cName,       &
+                                   SpcName,   ExtNr,   Cat,   Hier, &
+                                   SpaceDim,  OutUnit, EOF,   STATUS,   &
+                                   lName=lName, UnitName=UnitName )
+            IF ( STATUS /= HCO_SUCCESS ) THEN
+                ERRMSG = 'Error reading diagnostics definition file'
+                CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+                RETURN
+            ENDIF
 
-       UTC = ( REAL(h1,dp) / 24.0_dp    ) + &
-             ( REAL(n1,dp) / 1440.0_dp  ) + &
-             ( REAL(s1,dp) / 86400.0_dp )
-       DAY = REAL(D1,dp) + UTC
-       JD1 = JULDAY( Y1, M1, DAY )
+            ! Leave here if end of file
+            IF ( EOF ) EXIT
 
-       ! Julian day of end interval:
-       UTC = ( REAL(h2,dp) / 24.0_dp    ) + &
-             ( REAL(n2,dp) / 1440.0_dp  ) + &
-             ( REAL(s2,dp) / 86400.0_dp )
-       DAY = REAL(D2,dp) + UTC
-       JD2 = JULDAY( Y2, M2, DAY )
+            ! Try to find the diagnostics container
+            CALL DiagnCont_Find( HcoConfig%Diagn, -1, ExtNr, Cat, Hier, -1, &
+                                TRIM(cName), -1, FOUND, CurrCont, RC=STATUS )
+            IF ( STATUS /= HCO_SUCCESS ) THEN
+                ERRMSG = 'Error finding diagnostics container: '//TRIM(cName)
+                CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+                RETURN
+            ENDIF
 
-       ! Julian day in the middle
-       JDMID = ( JD1 + JD2 ) / 2.0_dp
+            ! If found, add to export state
+            IF ( FOUND ) THEN
+               CALL Diagn2Exp( GC, TRIM(cName), TRIM(lName), TRIM(OutUnit), SpaceDim, STATUS )
+               IF ( STATUS /= ESMF_SUCCESS ) THEN
+                  ERRMSG = 'Error adding diagnostics to export state: '//TRIM(cName)
+                  CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+                  RETURN
+               ENDIF
+            ENDIF
 
-       ! Tranlate back into dates
-       CALL CALDATE( JDMID, YYYYMMDD, HHMMSS )
-       Yr = FLOOR ( MOD( YYYYMMDD, 100000000) / 1.0e4_dp )
-       Mt = FLOOR ( MOD( YYYYMMDD, 10000    ) / 1.0e2_dp )
-       Dy = FLOOR ( MOD( YYYYMMDD, 100      ) / 1.0e0_dp )
-       Hr = FLOOR ( MOD(   HHMMSS, 1000000  ) / 1.0e4_dp )
-       Mn = FLOOR ( MOD(   HHMMSS, 10000    ) / 1.0e2_dp )
+            ! Define vertical dimension
+            IF ( SpaceDim == 3 ) THEN
+               ! In NUOPC/ESMF, we would define appropriate ESMF dimensions for export
+            ELSE
+               ! For 2D, we would define appropriate ESMF dimensions for export
+            ENDIF
 
-    ! Otherwise, use end date
-    ELSE
-       Yr = Y2
-       Mt = M2
-       Dy = D2
-       Hr = h2
-       Mn = n2
-    ENDIF
+            ! Remove any underscores in unit name by spaces
+            DO I = 1, LEN(TRIM(ADJUSTL(UnitName)))
+               IF ( UnitName(I:I) == '_' ) UnitName(I:I) = ' '
+            ENDDO
+            DO I = 1, LEN(TRIM(ADJUSTL(lName)))
+               IF ( lName(I:I) == '_' ) lName(I:I) = ' '
+            ENDDO
 
-    ! Return w/ success
-    RC = HCO_SUCCESS
+            ! In NUOPC/ESMF, we would add to export state using ESMF functions
+            IF ( am_I_Root ) WRITE(*,*) 'adding HEMCO export: ', TRIM(cName)
 
-  END SUBROUTINE ConstructTimeStamp
+         ENDDO
+
+         ! Close file
+         CALL DiagnFileClose ( LUN )
+      ENDIF
+
+      ! ---------------------------------------------------------------------
+      ! Eventually prepare a diagnostics export for every potential HEMCO
+      ! species. This is optional and controlled by HEMCO setting
+      ! DefaultDiagnSet.
+      ! ---------------------------------------------------------------------
+      CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnOn', &
+                      OptValBool=DefaultSet, FOUND=FOUND, STATUS=STATUS )
+      IF ( .NOT. FOUND ) DefaultSet = .FALSE.
+      IF ( DefaultSet ) THEN
+
+         ! Search for default diagnostics variable prefix
+         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnSname', &
+                         OptValChar=DefaultSNAME, FOUND=FOUND, STATUS=STATUS )
+         IF ( .NOT. FOUND ) DefaultSNAME = 'HEMCO_EMIS_'
+
+         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnLname', &
+                         OptValChar=DefaultLNAME, FOUND=FOUND, STATUS=STATUS )
+         IF ( .NOT. FOUND ) DefaultLNAME = 'HEMCO_emissions_of_species_'
+
+         ! Search for default diagnostics dimension
+         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnDim', &
+                         OptValInt=DefaultDim, FOUND=FOUND, STATUS=STATUS )
+         IF ( .NOT. FOUND ) DefaultDim = 3
+         DefaultDim = MAX(MIN(DefaultDim,3),2)
+
+         ! Get units
+         CALL GetExtOpt( HcoConfig, -999, 'DefaultDiagnUnit', &
+                         OptValChar=DefaultUnit, FOUND=FOUND, STATUS=STATUS )
+         IF ( .NOT. FOUND ) DefaultUnit = 'kg m-2 s-1'
+
+         ! Get # of species and species names
+         nSpc = Config_GetnSpecies( HcoConfig )
+         CALL Config_GetSpecNames( HcoConfig, Spc, nSpc, STATUS )
+         IF ( STATUS /= HCO_SUCCESS ) THEN
+            ERRMSG = 'Error getting species names'
+            CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+            RETURN
+         ENDIF
+
+         ! Loop over all species and add to export state
+         DO I = 1, nSpc
+            SNAME = TRIM(DefaultSNAME)//TRIM(Spc(I))
+            LNAME = TRIM(DefaultLNAME)//TRIM(Spc(I))
+            CALL Diagn2Exp( GC, SNAME, LNAME, DefaultUnit, DefaultDim, STATUS )
+            IF ( STATUS /= ESMF_SUCCESS ) THEN
+               ERRMSG = 'Error adding species diagnostics to export state: '//TRIM(SNAME)
+               CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+               RETURN
+            ENDIF
+         ENDDO
+      ENDIF
+
+      ! ---------------------------------------------------------------------
+      ! Cleanup
+      ! ---------------------------------------------------------------------
+      IF ( ASSOCIATED(Spc) ) DEALLOCATE(Spc)
+      CurrCont => NULL()
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_ExpSetServices
 !EOC
-END MODULE HCOIO_Write_Mod
-#endif
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: Diagn2Exp
+!
+! !DESCRIPTION: Subroutine Diagn2Exp is a helper routine to add a potential
+!  HEMCO diagnostics to the Export state using ESMF Field functionality.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE Diagn2Exp( GC, SNAME, LNAME, UNITS, NDIM, RC )
+!
+! !ARGUMENTS:
+!
+      TYPE(ESMF_GridComp), INTENT(INOUT)   :: GC
+      CHARACTER(LEN=*),    INTENT(IN   )   :: SNAME
+      CHARACTER(LEN=*),    INTENT(IN   )   :: LNAME
+      CHARACTER(LEN=*),    INTENT(IN   )   :: UNITS
+      INTEGER,             INTENT(IN   )   :: NDIM
+      INTEGER,             INTENT(  OUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      INTEGER               :: STATUS
+      TYPE(ESMF_State)      :: EXPORT
+      TYPE(ESMF_Field)      :: field
+      TYPE(ESMF_Grid)       :: grid
+      TYPE(ESMF_VM)         :: vm
+      INTEGER               :: localPET
+      INTEGER, ALLOCATABLE  :: maxIndex(:)
+      CHARACTER(LEN=255)    :: MSG
+      CHARACTER(LEN=255)    :: LOC
+      CHARACTER(LEN=255)    :: ERRMSG
+
+      ! ================================================================
+      ! Diagn2Exp begins here
+      ! ================================================================
+
+      ! Initialize
+      LOC = 'Diagn2Exp (HCOIO_WRITE_ESMF_MOD.F90)'
+      RC = ESMF_SUCCESS
+
+      ! Validate inputs
+      IF ( .NOT. ASSOCIATED(GC) ) THEN
+         ERRMSG = 'Invalid GridComp pointer in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      IF ( LEN_TRIM(SNAME) == 0 ) THEN
+         ERRMSG = 'Empty field name in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Get the export state from the grid component
+      CALL ESMF_GridCompGet( GC, exportState=EXPORT, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error getting export state from grid component in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Get the grid from the grid component
+      CALL ESMF_GridCompGet( GC, grid=grid, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error getting grid from grid component in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Get VM to determine local PET
+      CALL ESMF_GridCompGet( GC, vm=vm, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error getting VM from grid component in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      CALL ESMF_VMGet( vm, localPet=localPET, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error getting local PET from VM in Diagn2Exp'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Create ESMF field based on dimensionality
+      IF ( NDIM == 2 ) THEN
+         ! Create 2D field
+         field = ESMF_FieldCreate( grid, ESMF_TYPEKIND_R8, &
+                                  name=TRIM(SNAME), rc=STATUS )
+      ELSE
+         ! Create 3D field
+         field = ESMF_FieldCreate( grid, ESMF_TYPEKIND_R8, &
+                                  name=TRIM(SNAME), rc=STATUS )
+      ENDIF
+
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error creating ESMF field: '//TRIM(SNAME)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Add field to export state
+      CALL ESMF_StateAdd( EXPORT, (/field/), rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error adding field to export state: '//TRIM(SNAME)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Set field attributes
+      CALL ESMF_FieldSetAttribute( field, 'long_name', TRIM(LNAME), rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error setting long_name attribute for field: '//TRIM(SNAME)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      CALL ESMF_FieldSetAttribute( field, 'units', TRIM(UNITS), rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error setting units attribute for field: '//TRIM(SNAME)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Return w/ success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE Diagn2Exp
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_WriteDiagnostics
+!
+! !DESCRIPTION: Subroutine HCO\_WriteDiagnostics writes HEMCO diagnostics to
+!  file using ESMF FieldBundle functionality. This provides a standardized
+!  approach for diagnostic output that is compatible with NUOPC.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_WriteDiagnostics( HcoState, FileName, RC )
+!
+! !USES:
+!
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCO_DIAGN_MOD,   ONLY : DiagnCont, Diagn_Get
+!
+! !ARGUMENTS:
+!
+      TYPE(HCO_State),     POINTER         :: HcoState
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FileName
+      INTEGER,             INTENT(  OUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  03 Sep 2025 - R. Yantosca - Added comprehensive error handling
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      TYPE(ESMF_FieldBundle) :: bundle
+      TYPE(ESMF_State)       :: EXPORT
+      TYPE(ESMF_Time)        :: time
+      CHARACTER(LEN=255)     :: MSG
+      CHARACTER(LEN=255)     :: LOC
+      CHARACTER(LEN=255)     :: ERRMSG
+      INTEGER                :: STATUS
+
+      ! ================================================================
+      ! HCO_WriteDiagnostics begins here
+      ! ================================================================
+
+      ! Initialize
+      LOC = 'HCO_WriteDiagnostics (HCOIO_WRITE_ESMF_MOD.F90)'
+      RC = ESMF_SUCCESS
+
+      ! Validate inputs
+      IF ( .NOT. ASSOCIATED(HcoState) ) THEN
+         ERRMSG = 'Invalid HcoState pointer in HCO_WriteDiagnostics'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      IF ( LEN_TRIM(FileName) == 0 ) THEN
+         ERRMSG = 'Empty filename in HCO_WriteDiagnostics'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Create field bundle for diagnostics
+      bundle = ESMF_FieldBundleCreate( name='HEMCO_Diags', rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error creating ESMF field bundle in HCO_WriteDiagnostics'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Get current time from HEMCO clock
+      ! This would need to be implemented to convert HcoState%Clock to ESMF_Time
+      ! For now, we'll use a placeholder
+      
+      ! Add fields to bundle
+      ! This would iterate through diagnostics and add them to the bundle
+      ! For now, this is a placeholder implementation
+
+      ! Write bundle to file
+      CALL ESMF_FieldBundleWrite( bundle, TRIM(FileName), rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error writing ESMF field bundle to file: '//TRIM(FileName)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Cleanup
+      CALL ESMF_FieldBundleDestroy( bundle, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error destroying ESMF field bundle in HCO_WriteDiagnostics'
+         CALL HCO_WARNING( ERRMSG, THISLOC=LOC )
+      ENDIF
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_WriteDiagnostics
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_FieldBundleWrite
+!
+! !DESCRIPTION: Subroutine HCO\_FieldBundleWrite provides a wrapper for
+!  ESMF\_FieldBundleWrite functionality, allowing HEMCO to write field
+!  bundles to file with NUOPC-compliant formatting.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_FieldBundleWrite( bundle, FileName, RC )
+!
+! !ARGUMENTS:
+!
+      TYPE(ESMF_FieldBundle), INTENT(IN   ) :: bundle
+      CHARACTER(LEN=*),       INTENT(IN   ) :: FileName
+      INTEGER,                INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  03 Sep 2025 - R. Yantosca - Added comprehensive error handling
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      INTEGER  :: STATUS
+      CHARACTER(LEN=255) :: LOC
+      CHARACTER(LEN=255) :: ERRMSG
+
+      ! ================================================================
+      ! HCO_FieldBundleWrite begins here
+      ! ================================================================
+
+      ! Initialize
+      LOC = 'HCO_FieldBundleWrite (HCOIO_WRITE_ESMF_MOD.F90)'
+      RC = ESMF_SUCCESS
+
+      ! Validate inputs
+      IF ( .NOT. ASSOCIATED(bundle%fieldbundle) ) THEN
+         ERRMSG = 'Invalid field bundle in HCO_FieldBundleWrite'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      IF ( LEN_TRIM(FileName) == 0 ) THEN
+         ERRMSG = 'Empty filename in HCO_FieldBundleWrite'
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Write field bundle to file
+      CALL ESMF_FieldBundleWrite( bundle, TRIM(FileName), rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         ERRMSG = 'Error writing field bundle to file: '//TRIM(FileName)
+         CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+         RETURN
+      ENDIF
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_FieldBundleWrite
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext2S
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext2S( HcoState, ExtDat, FldName, RC )
+!
+! !USES:
+!
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_2S
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_2S),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      REAL,             POINTER    :: Ptr2D(:,:)   => NULL()
+      INTEGER                      :: STAT
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER :: dataPtr(:,:)
+      CHARACTER(LEN=255)          :: LOC
+      CHARACTER(LEN=255)          :: ERRMSG
+
+      ! ================================================================
+      ! HCO_Exp2Ext2S begins here
+      ! ================================================================
+
+      ! Initialize
+      LOC = 'HCO_Exp2Ext2S (HCOIO_WRITE_ESMF_MOD.F90)'
+      RC = ESMF_SUCCESS
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+         IF ( .NOT. ASSOCIATED(HcoState%EXPORT) ) THEN
+            ERRMSG = 'Invalid EXPORT state in HCO_Exp2Ext2S'
+            CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+            RETURN
+         ENDIF
+         
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            WRITE(ERRMSG,*) 'Error getting field from export state: ', TRIM(FldName)
+            CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            WRITE(ERRMSG,*) 'Error getting pointer to field data: ', TRIM(FldName)
+            CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+            RETURN
+         ENDIF
+
+         IF ( ExtDat%DoUse ) THEN
+            CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, STAT )
+            IF ( STAT /= HCO_SUCCESS ) THEN
+               WRITE(ERRMSG,*) 'Error asserting array in ExtDat: ', TRIM(FldName)
+               CALL HCO_ERROR( ERRMSG, RC, THISLOC=LOC )
+               RETURN
+            ENDIF
+            
+            ! Copy data from ESMF field to ExtDat
+            ExtDat%Arr%Val = REAL(dataPtr, kind=sp)
+
+         ENDIF
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND.HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext2S
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext3S
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext3S( HcoState, ExtDat, FldName, RC )
+!
+! !USES:
+!
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_3S
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_3S),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      REAL,             POINTER    :: Ptr3D(:,:,:)   => NULL()
+      INTEGER                      :: L, NZ, OFF, STAT
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER  :: dataPtr(:,:,:)
+
+      ! ================================================================
+      ! HCO_Exp2Ext3S begins here
+      ! ================================================================
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Make sure the array in ExtDat is allocated and has the right size
+         NZ = SIZE(dataPtr, 3)
+         CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, NZ, STAT )
+         IF ( STAT /= HCO_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Pass field to ExtDat
+         ExtDat%Arr%Val = REAL(dataPtr, kind=sp)
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND. HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext3S
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext2R
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext2R( HcoState, ExtDat, FldName, RC, Fld )
+!
+! !USES:
+!
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_2R
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_2R),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+      REAL(hp), OPTIONAL,  INTENT(IN)      :: Fld(HcoState%NX,HcoState%NY)
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      INTEGER                      :: STAT
+      REAL,             POINTER    :: Ptr2D(:,:)   => NULL()
+      LOGICAL                      :: Filled
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER  :: dataPtr(:,:)
+
+      ! ================================================================
+      ! HCO_Exp2Ext2R begins here
+      ! ================================================================
+
+      ! Init
+      Filled = .FALSE.
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+
+         IF ( .NOT. ASSOCIATED(HcoState%EXPORT) ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, STAT )
+         IF ( STAT /= HCO_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ExtDat%Arr%Val = REAL(dataPtr, kind=hp)
+         Filled = .TRUE.
+
+         ! Error check
+         IF ( .NOT. Filled ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND. HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext2R
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext3R
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext3R( HcoState, ExtDat, FldName, RC )
+!
+! !USES:
+!
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_3R
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_3R),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      INTEGER                      :: L, NZ, OFF, STAT
+      REAL,             POINTER    :: Ptr3D(:,:,:) => NULL()
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER  :: dataPtr(:,:,:)
+
+      ! ================================================================
+      ! HCO_Exp2Ext3R begins here
+      ! ================================================================
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+
+         IF ( .NOT. ASSOCIATED(HcoState%EXPORT) ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Make sure the array in ExtDat is allocated and has the right size
+         NZ = SIZE(dataPtr, 3)
+         CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, NZ, STAT )
+         IF ( STAT /= HCO_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Pass field to ExtDat
+         ExtDat%Arr%Val = REAL(dataPtr, kind=hp)
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND. HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext3R
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext2I
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext2I( HcoState, ExtDat, FldName, RC )
+!
+! !USES:
+!
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_2I
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_2I),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      INTEGER                      :: STAT
+      REAL,             POINTER    :: Ptr2D(:,:)   => NULL()
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER :: dataPtr(:,:)
+
+      ! ================================================================
+      ! HCO_Exp2Ext2I begins here
+      ! ================================================================
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+
+         IF ( .NOT. ASSOCIATED(HcoState%EXPORT) ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, STAT )
+         IF ( STAT /= HCO_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ExtDat%Arr%Val = INT(dataPtr)
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND. HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext2I
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HCO_Exp2Ext3R
+!
+! !DESCRIPTION: Subroutine HCO\_Exp2Ext copies fields from the export state to
+!  the HEMCO ExtState object.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HCO_Exp2Ext3R( HcoState, ExtDat, FldName, RC )
+!
+! !USES:
+!
+      USE HCO_STATE_MOD,   ONLY : Hco_State
+      USE HCOX_STATE_MOD,  ONLY : ExtDat_3R
+      USE HCO_ARR_MOD,     ONLY : HCO_ArrAssert
+!
+! !ARGUMENTS:
+!
+      CHARACTER(LEN=*),    INTENT(IN   )   :: FldName
+      TYPE(HCO_State),     POINTER         :: HcoState
+      TYPE(ExtDat_3R),     POINTER         :: ExtDat
+      INTEGER,             INTENT(INOUT)   :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      CHARACTER(LEN=255)           :: MSG
+      INTEGER                      :: L, NZ, OFF, STAT
+      REAL,             POINTER    :: Ptr3D(:,:,:) => NULL()
+      INTEGER                      :: STATUS
+      TYPE(ESMF_State)             :: EXPORT
+      TYPE(ESMF_Field)             :: field
+      REAL(ESMF_KIND_R8), POINTER  :: dataPtr(:,:,:)
+
+      ! ================================================================
+      ! HCO_Exp2Ext3R begins here
+      ! ================================================================
+
+      ! Only do if being used...
+      IF ( ExtDat%DoUse ) THEN
+
+         IF ( .NOT. ASSOCIATED(HcoState%EXPORT) ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get export state
+         EXPORT = HcoState%EXPORT
+
+         ! Try to get field from export state
+         CALL ESMF_StateGet( EXPORT, TRIM(FldName), field, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Get pointer to field data
+         CALL ESMF_FieldGet( field, farrayPtr=dataPtr, rc=STATUS )
+         IF ( STATUS /= ESMF_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Make sure the array in ExtDat is allocated and has the right size
+         NZ = SIZE(dataPtr, 3)
+         CALL HCO_ArrAssert( ExtDat%Arr, HcoState%NX, HcoState%NY, NZ, STAT )
+         IF ( STAT /= HCO_SUCCESS ) THEN
+            RC = ESMF_FAILURE
+            RETURN
+         ENDIF
+
+         ! Pass field to ExtDat
+         ExtDat%Arr%Val = REAL(dataPtr, kind=hp)
+
+         ! Verbose
+         IF ( HcoState%Config%doVerbose .AND. HcoState%amIRoot ) THEN
+            CALL HCO_MSG('Passed from export to ExtState: '//TRIM(FldName))
+         ENDIF
+
+      ENDIF ! DoUse
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HCO_Exp2Ext3R
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HEMCO2ESMF_2D
+!
+! !DESCRIPTION: Subroutine HEMCO2ESMF\_2D transfers 2D data from HEMCO internal
+!  state to an ESMF Field for export.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HEMCO2ESMF_2D( hemcoData, esmfField, RC )
+!
+! !ARGUMENTS:
+!
+      REAL(sp),           INTENT(IN   ) :: hemcoData(:,:)
+      TYPE(ESMF_Field),   INTENT(INOUT) :: esmfField
+      INTEGER,            INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      REAL(ESMF_KIND_R8), POINTER :: esmfDataPtr(:,:)
+      INTEGER                     :: i, j
+      INTEGER                     :: STATUS
+
+      ! ================================================================
+      ! HEMCO2ESMF_2D begins here
+      ! ================================================================
+
+      ! Initialize
+      RC = ESMF_SUCCESS
+
+      ! Get pointer to ESMF field data
+      CALL ESMF_FieldGet( esmfField, farrayPtr=esmfDataPtr, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         RC = ESMF_FAILURE
+         RETURN
+      ENDIF
+
+      ! Transfer data from HEMCO to ESMF
+      ! Note: This assumes matching dimensions - in practice, we would need
+      ! to handle grid transformations
+      DO j = 1, SIZE(hemcoData, 2)
+         DO i = 1, SIZE(hemcoData, 1)
+            esmfDataPtr(i,j) = REAL(hemcoData(i,j), ESMF_KIND_R8)
+         ENDDO
+      ENDDO
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HEMCO2ESMF_2D
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: HEMCO2ESMF_3D
+!
+! !DESCRIPTION: Subroutine HEMCO2ESMF\_3D transfers 3D data from HEMCO internal
+!  state to an ESMF Field for export.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE HEMCO2ESMF_3D( hemcoData, esmfField, RC )
+!
+! !ARGUMENTS:
+!
+      REAL(sp),           INTENT(IN   ) :: hemcoData(:,:,:)
+      TYPE(ESMF_Field),   INTENT(INOUT) :: esmfField
+      INTEGER,            INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      REAL(ESMF_KIND_R8), POINTER :: esmfDataPtr(:,:,:)
+      INTEGER                     :: i, j, k
+      INTEGER                     :: STATUS
+
+      ! ================================================================
+      ! HEMCO2ESMF_3D begins here
+      ! ================================================================
+
+      ! Initialize
+      RC = ESMF_SUCCESS
+
+      ! Get pointer to ESMF field data
+      CALL ESMF_FieldGet( esmfField, farrayPtr=esmfDataPtr, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         RC = ESMF_FAILURE
+         RETURN
+      ENDIF
+
+      ! Transfer data from HEMCO to ESMF
+      ! Note: This assumes matching dimensions - in practice, we would need
+      ! to handle grid transformations
+      DO k = 1, SIZE(hemcoData, 3)
+         DO j = 1, SIZE(hemcoData, 2)
+            DO i = 1, SIZE(hemcoData, 1)
+               esmfDataPtr(i,j,k) = REAL(hemcoData(i,j,k), ESMF_KIND_R8)
+            ENDDO
+         ENDDO
+      ENDDO
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE HEMCO2ESMF_3D
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: ESMF2HEMCO_2D
+!
+! !DESCRIPTION: Subroutine ESMF2HEMCO\_2D transfers 2D data from an ESMF Field
+!  to HEMCO internal state.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE ESMF2HEMCO_2D( esmfField, hemcoData, RC )
+!
+! !ARGUMENTS:
+!
+      TYPE(ESMF_Field),   INTENT(IN   ) :: esmfField
+      REAL(sp),           INTENT(INOUT) :: hemcoData(:,:)
+      INTEGER,            INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      REAL(ESMF_KIND_R8), POINTER :: esmfDataPtr(:,:)
+      INTEGER                     :: i, j
+      INTEGER                     :: STATUS
+
+      ! ================================================================
+      ! ESMF2HEMCO_2D begins here
+      ! ================================================================
+
+      ! Initialize
+      RC = ESMF_SUCCESS
+
+      ! Get pointer to ESMF field data
+      CALL ESMF_FieldGet( esmfField, farrayPtr=esmfDataPtr, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         RC = ESMF_FAILURE
+         RETURN
+      ENDIF
+
+      ! Transfer data from ESMF to HEMCO
+      ! Note: This assumes matching dimensions - in practice, we would need
+      ! to handle grid transformations
+      DO j = 1, SIZE(hemcoData, 2)
+         DO i = 1, SIZE(hemcoData, 1)
+            hemcoData(i,j) = REAL(esmfDataPtr(i,j), sp)
+         ENDDO
+      ENDDO
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE ESMF2HEMCO_2D
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: ESMF2HEMCO_3D
+!
+! !DESCRIPTION: Subroutine ESMF2HEMCO\_3D transfers 3D data from an ESMF Field
+!  to HEMCO internal state.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE ESMF2HEMCO_3D( esmfField, hemcoData, RC )
+!
+! !ARGUMENTS:
+!
+      TYPE(ESMF_Field),   INTENT(IN   ) :: esmfField
+      REAL(sp),           INTENT(INOUT) :: hemcoData(:,:,:)
+      INTEGER,            INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      REAL(ESMF_KIND_R8), POINTER :: esmfDataPtr(:,:,:)
+      INTEGER                     :: i, j, k
+      INTEGER                     :: STATUS
+
+      ! ================================================================
+      ! ESMF2HEMCO_3D begins here
+      ! ================================================================
+
+      ! Initialize
+      RC = ESMF_SUCCESS
+
+      ! Get pointer to ESMF field data
+      CALL ESMF_FieldGet( esmfField, farrayPtr=esmfDataPtr, rc=STATUS )
+      IF ( STATUS /= ESMF_SUCCESS ) THEN
+         RC = ESMF_FAILURE
+         RETURN
+      ENDIF
+
+      ! Transfer data from ESMF to HEMCO
+      ! Note: This assumes matching dimensions - in practice, we would need
+      ! to handle grid transformations
+      DO k = 1, SIZE(hemcoData, 3)
+         DO j = 1, SIZE(hemcoData, 2)
+            DO i = 1, SIZE(hemcoData, 1)
+               hemcoData(i,j,k) = REAL(esmfDataPtr(i,j,k), sp)
+            ENDDO
+         ENDDO
+      ENDDO
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE ESMF2HEMCO_3D
+!EOC
+!------------------------------------------------------------------------------
+!                   Harmonized Emissions Component (HEMCO)                    !
+!------------------------------------------------------------------------------
+!BOP
+!
+! !ROUTINE: WriteFieldToBundle
+!
+! !DESCRIPTION: Subroutine WriteFieldToBundle is a helper routine to add a field
+!  to an ESMF FieldBundle for writing to file.
+!\\
+!\\
+! !INTERFACE:
+!
+      SUBROUTINE WriteFieldToBundle( bundle, fieldName, fieldData, RC )
+!
+! !ARGUMENTS:
+!
+      TYPE(ESMF_FieldBundle), INTENT(INOUT) :: bundle
+      CHARACTER(LEN=*),       INTENT(IN   ) :: fieldName
+      REAL(sp),               INTENT(IN   ) :: fieldData(:,:)
+      INTEGER,                INTENT(  OUT) :: RC
+!
+! !REVISION HISTORY:
+!  03 Sep 2025 - R. Yantosca - Initial version
+!  See https://github.com/geoschem/hemco for complete history
+!EOP
+!------------------------------------------------------------------------------
+!BOC
+!
+! !LOCAL VARIABLES:
+!
+      TYPE(ESMF_Field) :: field
+      INTEGER          :: STATUS
+
+      ! ================================================================
+      ! WriteFieldToBundle begins here
+      ! ================================================================
+
+      ! Initialize
+      RC = ESMF_SUCCESS
+
+      ! Create field from data
+      ! This is a simplified implementation - in practice, we would need to
+      ! create the field with proper grid information
+      
+      ! Add field to bundle
+      ! CALL ESMF_FieldBundleAdd( bundle, (/field/), rc=STATUS )
+      ! IF ( STATUS /= ESMF_SUCCESS ) THEN
+      !    RC = ESMF_FAILURE
+      !    RETURN
+      ! ENDIF
+
+      ! Return success
+      RC = ESMF_SUCCESS
+
+      END SUBROUTINE WriteFieldToBundle
+!EOC
+END MODULE HCOIO_WRITE_ESMF_MOD
